@@ -1,14 +1,18 @@
 [package]
-name = "hnsw_rs"
-version = "0.3.2"
-authors = ["jeanpierre.both@gmail.com"]
-description = "Ann based on Hierarchical Navigable Small World Graphs from Yu.A. Malkov and D.A Yashunin"
-license = "MIT/Apache-2.0"
+name = "tessera-hnsw"
+version = "0.1.0"
+authors = ["MojoBytes <noreply@mojobytes.ai>"]
+description = "Fork of hnsw_rs with VectorStorage trait for Tessera vector database - HNSW implementation without embedded vectors"
+license = "MIT"
 readme = "README.md"
-keywords = ["algorithms", "ann", "hnsw"]
-repository = "https://github.com/jean-pierreBoth/hnswlib-rs"
-documentation = "https://docs.rs/hnsw_rs"
+keywords = ["algorithms", "ann", "hnsw", "tessera", "vector-database"]
+repository = "https://github.com/mojobytes/tessera-hnsw"
+documentation = "https://docs.rs/tessera-hnsw"
 edition = "2024"
+
+[package.metadata]
+upstream = "https://github.com/jean-pierreBoth/hnswlib-rs"
+upstream-version = "0.3.2"
 
 
 # declare a feature with no dependancy to get some modulated debug print
