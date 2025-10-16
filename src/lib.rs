@@ -13,6 +13,7 @@ pub mod hnsw;
 pub mod hnswio;
 pub mod libext;
 pub mod prelude;
+pub mod storage;
 
 // we impose our version of anndists
 pub use anndists;
