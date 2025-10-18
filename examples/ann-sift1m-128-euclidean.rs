@@ -38,7 +38,7 @@ use log::info;
 //     48           1600        64            0.5              0          0        0.9938       17000       1.0002
 //     48           1600       128            0.5              0          0        0.9992       9600        1.0000
 
-use hnsw_rs::prelude::*;
+use tessera_hnsw::prelude::*;
 
 mod utils;
 use utils::*;

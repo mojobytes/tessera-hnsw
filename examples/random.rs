@@ -7,7 +7,7 @@ use rand::prelude::*;
 use std::time::{Duration, SystemTime};
 
 use anndists::dist::*;
-use hnsw_rs::prelude::*;
+use tessera_hnsw::prelude::*;
 
 fn main() {
     env_logger::Builder::from_default_env().init();

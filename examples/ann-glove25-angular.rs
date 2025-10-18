@@ -59,7 +59,7 @@ use std::time::{Duration, SystemTime};
 //  48            800        128            0.5            1          0          0.985        11484     1.001
 
 use anndists::dist::*;
-use hnsw_rs::prelude::*;
+use tessera_hnsw::prelude::*;
 use log::info;
 
 mod utils;

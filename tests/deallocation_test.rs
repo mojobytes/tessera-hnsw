@@ -1,7 +1,7 @@
 use env_logger::Builder;
 
 use anndists::dist::DistL1;
-use hnsw_rs::hnsw::Hnsw;
+use tessera_hnsw::hnsw::Hnsw;
 
 // A test program to see if memory from insertions gets deallocated.
 // This program sets up a process that iteratively builds a new model and lets it go out of scope.

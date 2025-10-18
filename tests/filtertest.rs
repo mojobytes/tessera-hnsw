@@ -2,7 +2,7 @@
 #![allow(clippy::range_zip_with_len)]
 
 use anndists::dist::*;
-use hnsw_rs::prelude::*;
+use tessera_hnsw::prelude::*;
 use rand::{Rng, distr::Uniform};
 use std::iter;
 

@@ -11,7 +11,7 @@ use rand::prelude::*;
 use skiplist::OrderedSkipList;
 
 use anndists::dist;
-use hnsw_rs::prelude::*;
+use tessera_hnsw::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub fn gen_random_vector_f32(nbrow: usize) -> Vec<f32> {

@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime};
 //     24           400         24           0.5              0          0      0.990        58722        1.000
 
 use anndists::dist::*;
-use hnsw_rs::prelude::*;
+use tessera_hnsw::prelude::*;
 use log::info;
 
 mod utils;
