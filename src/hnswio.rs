@@ -515,6 +515,7 @@ impl HnswIo {
             dist_f: D::default(),
             searching: false,
             datamap_opt: true, // set datamap_opt to true
+            vector_storage: None, // Legacy mode, vectors embedded in Points
         };
         //
         debug!("load_hnsw completed");
@@ -604,6 +605,7 @@ impl HnswIo {
             dist_f: f,
             searching: false,
             datamap_opt: false,
+            vector_storage: None, // Legacy mode, vectors embedded in Points
         };
         //
         debug!("load_hnsw_with_dist completed");
@@ -1346,10 +1348,10 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync> HnswIoT for PointInd
 //
 //
 
-impl<T: Serialize + DeserializeOwned + Clone + Sized + Send + Sync, D: Distance<T> + Send + Sync>
-    HnswIoT for Hnsw<'_, T, D>
+impl<'b, T: Serialize + DeserializeOwned + Clone + Sized + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync, VS: crate::storage::VectorStorage<'b, T>>
+    HnswIoT for Hnsw<'b, T, D, VS>
 {
-    /// The dump method for hnsw.  
+    /// The dump method for hnsw.
     /// - graphout is a BufWriter dedicated to the dump of the graph part of Hnsw
     /// - dataout is a bufWriter dedicated to the dump of the data stored in the Hnsw structure.
     fn dump(&self, mode: DumpMode, dumpinit: &mut DumpInit) -> anyhow::Result<i32> {

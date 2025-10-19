@@ -27,6 +27,7 @@ use log::{debug, info};
 
 pub use crate::filter::FilterT;
 use anndists::dist::distances::Distance;
+use crate::storage::VectorStorage;
 
 // TODO
 // Profiling.
@@ -36,6 +37,31 @@ use anndists::dist::distances::Distance;
 /// It must be associated to the unit structure dist::NoDist for the distance type to provide.
 #[derive(Default, Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct NoData;
+
+/// Marker type for Hnsw without external vector storage (legacy mode).
+/// When used as the VS generic parameter, Hnsw stores vectors internally in Points.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct NoStorage;
+
+/// Implementation of VectorStorage for NoStorage (no-op).
+/// This allows Hnsw to work without external storage (legacy mode).
+impl<'a, T: Clone + Send + Sync + std::fmt::Debug + 'a> VectorStorage<'a, T> for NoStorage {
+    fn get_vector(&'a self, _id: usize) -> Option<&'a [T]> {
+        None
+    }
+
+    fn dimension(&self) -> usize {
+        0
+    }
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn is_empty(&self) -> bool {
+        true
+    }
+}
 
 /// maximum number of layers
 pub(crate) const NB_LAYER_MAX: u8 = 16; // so max layer is 15!!
@@ -131,6 +157,8 @@ enum PointData<'b, T: Clone + Send + Sync + 'b> {
     V(Vec<T>),
     // areference to a mmaped slice
     S(&'b [T]),
+    // vector ID for external storage
+    VectorId(usize),
 } // end of enum PointData
 
 impl<'b, T: Clone + Send + Sync + 'b> PointData<'b, T> {
@@ -148,6 +176,9 @@ impl<'b, T: Clone + Send + Sync + 'b> PointData<'b, T> {
         match self {
             PointData::V(v) => v.as_slice(),
             PointData::S(s) => s,
+            PointData::VectorId(_) => {
+                panic!("Cannot access vector from VectorId without VectorStorage")
+            }
         }
     } // end of get_v
 } // end of impl block for PointData
@@ -726,12 +757,19 @@ impl<'b, T: Clone + Send + Sync + 'b> Iterator for IterPointLayer<'_, 'b, T> {
 // ============================================================================================
 
 // The fields are made pub(crate) to be able to initialize struct from hnswio
-/// The Base structure for hnsw implementation.  
+/// The Base structure for hnsw implementation.
 /// The main useful functions are : new, insert, insert_parallel, search, parallel_search and file_dump
-/// as described in trait AnnT.  
+/// as described in trait AnnT.
 ///
 /// Other functions are mainly for others crate to get access to some fields.
-pub struct Hnsw<'b, T: Clone + Send + Sync + 'b, D: Distance<T>> {
+///
+/// # Generic Parameters
+///
+/// * `'b` - Lifetime for borrowed data (mmap slices or VectorStorage references)
+/// * `T` - Element type of vectors
+/// * `D` - Distance function type
+/// * `VS` - Vector storage type (defaults to `NoStorage` for legacy mode)
+pub struct Hnsw<'b, T: Clone + Send + Sync + 'b, D: Distance<T>, VS: VectorStorage<'b, T> = NoStorage> {
     /// asked number of candidates in search
     pub(crate) ef_construction: usize,
     /// maximum number of connection by layer for a point
@@ -755,13 +793,16 @@ pub struct Hnsw<'b, T: Clone + Send + Sync + 'b, D: Distance<T>> {
     pub(crate) searching: bool,
     /// set to true if some data come from a mmap
     pub(crate) datamap_opt: bool,
+    /// External vector storage (optional, for external vector management).
+    /// When `Some`, vectors are accessed via VectorStorage trait instead of being embedded in Points.
+    pub(crate) vector_storage: Option<&'b VS>,
 } // end of Hnsw
 
-impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
-    /// allocation function  
+impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync, VS: VectorStorage<'b, T>> Hnsw<'b, T, D, VS> {
+    /// allocation function
     /// . max_nb_connection : number of neighbours stored, by layer, in tables. Must be less than 256.
-    /// . ef_construction : controls numbers of neighbours explored during construction. See README or paper.  
-    /// . max_elements : hint to speed up allocation tables. number of elements expected.  
+    /// . ef_construction : controls numbers of neighbours explored during construction. See README or paper.
+    /// . max_elements : hint to speed up allocation tables. number of elements expected.
     /// . f : the distance function
     pub fn new(
         max_nb_connection: usize,
@@ -769,7 +810,7 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
         max_layer: usize,
         ef_construction: usize,
         f: D,
-    ) -> Self {
+    ) -> Hnsw<'b, T, D, NoStorage> {
         let adjusted_max_layer = (NB_LAYER_MAX as usize).min(max_layer);
         let layer_indexed_points =
             PointIndexation::<T>::new(max_nb_connection, adjusted_max_layer, max_elements);
@@ -798,8 +839,73 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             dist_f: f,
             searching: false,
             datamap_opt: false,
+            vector_storage: None,
         }
     } // end of new
+
+    /// allocation function with external vector storage
+    /// . max_nb_connection : number of neighbours stored, by layer, in tables. Must be less than 256.
+    /// . ef_construction : controls numbers of neighbours explored during construction. See README or paper.
+    /// . max_elements : hint to speed up allocation tables. number of elements expected.
+    /// . f : the distance function
+    /// . storage : reference to external VectorStorage implementation
+    pub fn new_with_storage(
+        max_nb_connection: usize,
+        max_elements: usize,
+        max_layer: usize,
+        ef_construction: usize,
+        f: D,
+        storage: &'b VS,
+    ) -> Self {
+        let adjusted_max_layer = (NB_LAYER_MAX as usize).min(max_layer);
+        let layer_indexed_points =
+            PointIndexation::<T>::new(max_nb_connection, adjusted_max_layer, max_elements);
+        let extend_candidates = false;
+        let keep_pruned = false;
+        //
+        if max_nb_connection > 256 {
+            println!("error max_nb_connection must be less equal than 256");
+            std::process::exit(1);
+        }
+        //
+        info!("Hnsw max_nb_connection {:?}", max_nb_connection);
+        info!("Hnsw nb elements {:?}", max_elements);
+        info!("Hnsw ef_construction {:?}", ef_construction);
+        info!("Hnsw distance {:?}", type_name::<D>());
+        info!("Hnsw extend candidates {:?}", extend_candidates);
+        info!("Hnsw using external VectorStorage");
+        //
+        Hnsw {
+            max_nb_connection,
+            ef_construction,
+            extend_candidates,
+            keep_pruned,
+            max_layer: adjusted_max_layer,
+            layer_indexed_points,
+            data_dimension: 0,
+            dist_f: f,
+            searching: false,
+            datamap_opt: false,
+            vector_storage: Some(storage),
+        }
+    } // end of new_with_storage
+
+    /// Helper method to get vector data from a Point, accounting for VectorStorage.
+    /// This abstracts away whether vectors are stored internally or externally.
+    #[inline]
+    fn get_point_vector<'a>(&'a self, point: &'a Point<'b, T>) -> &'a [T] {
+        match &point.data {
+            PointData::V(v) => v.as_slice(),
+            PointData::S(s) => s,
+            PointData::VectorId(id) => {
+                // We must have VectorStorage if PointData is VectorId
+                self.vector_storage
+                    .expect("VectorStorage required for VectorId points")
+                    .get_vector(*id)
+                    .expect("Vector not found in storage")
+            }
+        }
+    }
 
     /// get ef_construction used in graph creation
     pub fn get_ef_construction(&self) -> usize {
@@ -940,7 +1046,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             return return_points;
         }
         // initialize visited points
-        let dist_to_entry_point = self.dist_f.eval(point, entry_point.data.get_v());
+        let entry_vec = self.get_point_vector(&entry_point);
+        let dist_to_entry_point = self.dist_f.eval(point, entry_vec);
         trace!("       distance to entry point: {:?} ", dist_to_entry_point);
         // keep a list of id visited
         let mut visited_point_id = HashMap::<PointId, Arc<Point<T>>>::new();
@@ -1014,7 +1121,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                         return return_points;
                     }
                     let f = f_opt.unwrap();
-                    let e_dist_to_p = self.dist_f.eval(point, e.point_ref.data.get_v());
+                    let e_vec = self.get_point_vector(&e.point_ref);
+                    let e_dist_to_p = self.dist_f.eval(point, e_vec);
                     let f_dist_to_p = f.dist_to_ref;
                     if e_dist_to_p < f_dist_to_p || return_points.len() < ef {
                         let e_prime = Arc::new(PointWithOrder::new(&e.point_ref, e_dist_to_p));
@@ -1098,9 +1206,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             self.layer_indexed_points.check_entry_point(&new_point);
             return;
         }
-        let mut dist_to_entry = self
-            .dist_f
-            .eval(data, enter_point_copy.as_ref().unwrap().data.get_v());
+        let entry_vec = self.get_point_vector(enter_point_copy.as_ref().unwrap());
+        let mut dist_to_entry = self.dist_f.eval(data, entry_vec);
         // we go from self.max_level_observed to level+1 included
         for l in ((level + 1)..(max_level_observed + 1)).rev() {
             // CAVEAT could bypass when layer empty, avoid  allocation..
@@ -1134,7 +1241,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                     new_point.neighbours.write()[l as usize].push(Arc::clone(&ep));
                 }
                 // get the lowest distance point
-                let tmp_dist = self.dist_f.eval(data, ep.point_ref.data.get_v());
+                let ep_vec = self.get_point_vector(&ep.point_ref);
+                let tmp_dist = self.dist_f.eval(data, ep_vec);
                 if tmp_dist < dist_to_entry {
                     enter_point_copy = Some(Arc::clone(&ep.point_ref));
                     dist_to_entry = tmp_dist;
@@ -1344,7 +1452,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                 new_candidates_set.len()
             );
             for (_p_id, p_point) in new_candidates_set.iter() {
-                let dist_topoint = self.dist_f.eval(data, p_point.data.get_v());
+                let p_vec = self.get_point_vector(p_point);
+                let dist_topoint = self.dist_f.eval(data, p_vec);
                 candidates.push(Arc::new(PointWithOrder::new(p_point, -dist_topoint)));
             }
         } // end if extend_candidates
@@ -1354,12 +1463,13 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             // compare distances of e to data. we do not need to recompute dists!
             if let Some(e_p) = candidates.pop() {
                 let mut e_to_insert = true;
-                let e_point_v = e_p.point_ref.data.get_v();
+                let e_point_v = self.get_point_vector(&e_p.point_ref);
                 assert!(e_p.dist_to_ref <= 0.);
                 // is e_p the nearest to reference? data than to previous neighbours
                 if !neighbours_vec.is_empty() {
                     e_to_insert = !neighbours_vec.iter().any(|d| {
-                        self.dist_f.eval(e_point_v, d.point_ref.data.get_v()) <= -e_p.dist_to_ref
+                        let d_vec = self.get_point_vector(&d.point_ref);
+                        self.dist_f.eval(e_point_v, d_vec) <= -e_p.dist_to_ref
                     });
                 }
                 if e_to_insert {
@@ -1431,15 +1541,15 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             }
         }
         //
-        let mut dist_to_entry = self.dist_f.eval(data, entry_point.as_ref().data.get_v());
+        let entry_vec = self.get_point_vector(entry_point.as_ref());
+        let mut dist_to_entry = self.dist_f.eval(data, entry_vec);
         for layer in (1..=entry_point.p_id.0).rev() {
             let mut neighbours = self.search_layer(data, Arc::clone(&entry_point), 1, layer, None);
             neighbours = from_positive_binaryheap_to_negative_binary_heap(&mut neighbours);
             if let Some(entry_point_tmp) = neighbours.pop() {
                 // get the lowest  distance point.
-                let tmp_dist = self
-                    .dist_f
-                    .eval(data, entry_point_tmp.point_ref.data.get_v());
+                let tmp_vec = self.get_point_vector(&entry_point_tmp.point_ref);
+                let tmp_dist = self.dist_f.eval(data, tmp_vec);
                 if tmp_dist < dist_to_entry {
                     entry_point = Arc::clone(&entry_point_tmp.point_ref);
                     dist_to_entry = tmp_dist;
@@ -1491,7 +1601,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             }
         }
         //
-        let mut dist_to_entry = self.dist_f.eval(data, entry_point.as_ref().data.get_v());
+        let entry_vec = self.get_point_vector(entry_point.as_ref());
+        let mut dist_to_entry = self.dist_f.eval(data, entry_vec);
         let mut pivot = Arc::clone(&entry_point);
         let mut new_pivot = None;
 
@@ -1503,7 +1614,8 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                 let neighbours = &pivot.neighbours.read()[layer as usize];
                 for n in neighbours {
                     // get the lowest  distance point.
-                    let tmp_dist = self.dist_f.eval(data, n.point_ref.data.get_v());
+                    let n_vec = self.get_point_vector(&n.point_ref);
+                    let tmp_dist = self.dist_f.eval(data, n_vec);
                     if tmp_dist < dist_to_entry {
                         new_pivot = Some(Arc::clone(&n.point_ref));
                         has_changed = true;
@@ -1673,12 +1785,14 @@ fn from_positive_binaryheap_to_negative_binary_heap<'b, T: Send + Sync + Clone>(
 // essentialy to check dump/reload conssistency
 // in fact checks only equality of graph
 #[allow(unused)]
-pub(crate) fn check_graph_equality<T1, D1, T2, D2>(hnsw1: &Hnsw<T1, D1>, hnsw2: &Hnsw<T2, D2>)
+pub(crate) fn check_graph_equality<'a, 'b, T1, D1, VS1, T2, D2, VS2>(hnsw1: &Hnsw<'a, T1, D1, VS1>, hnsw2: &Hnsw<'b, T2, D2, VS2>)
 where
-    T1: Copy + Clone + Send + Sync,
+    T1: Copy + Clone + Send + Sync + std::fmt::Debug + 'a,
     D1: Distance<T1> + Default + Send + Sync,
-    T2: Copy + Clone + Send + Sync,
+    VS1: VectorStorage<'a, T1>,
+    T2: Copy + Clone + Send + Sync + std::fmt::Debug + 'b,
     D2: Distance<T2> + Default + Send + Sync,
+    VS2: VectorStorage<'b, T2>,
 {
     //
     debug!("In check_graph_equality");
@@ -1776,7 +1890,7 @@ mod tests {
         let ef_construct = 25;
         let nb_connection = 10;
         let start = ProcessTime::now();
-        let hns = Hnsw::<f32, dist::DistL1>::new(
+        let hns = Hnsw::<f32, dist::DistL1, NoStorage>::new(
             nb_connection,
             nbcolumn,
             16,
@@ -1824,7 +1938,7 @@ mod tests {
         let ef_construct = 25;
         let nb_connection = 10;
         let start = ProcessTime::now();
-        let hns = Hnsw::<f32, dist::DistL1>::new(
+        let hns = Hnsw::<f32, dist::DistL1, NoStorage>::new(
             nb_connection,
             nbcolumn,
             16,
@@ -1862,11 +1976,57 @@ mod tests {
         log_init_test();
         //
         for _ in 0..800 {
-            let hnsw: Hnsw<f32, dist::DistL1> =
-                Hnsw::new(15, 100_000, 20, 500_000, dist::DistL1 {});
+            let hnsw = Hnsw::<f32, dist::DistL1, NoStorage>::new(15, 100_000, 20, 500_000, dist::DistL1 {});
             hnsw.insert((&[1.0, 0.0, 0.0, 0.0], 0));
             let result = hnsw.search(&[1.0, 0.0, 0.0, 0.0], 2, 10);
             assert_eq!(result, vec![Neighbour::new(0, 0.0, PointId(0, 0))]);
         }
+    }
+
+    // Test creating Hnsw with InMemoryVectorStorage
+    #[test]
+    fn test_hnsw_with_vector_storage() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        // Create test vectors
+        let vectors = vec![
+            vec![0.0f32, 0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        ];
+
+        // Create VectorStorage
+        let storage = InMemoryVectorStorage::new(vectors);
+
+        // Create Hnsw with storage
+        let _hnsw: Hnsw<f32, dist::DistL2, InMemoryVectorStorage<f32>> =
+            Hnsw::new_with_storage(15, 100, 16, 200, dist::DistL2 {}, &storage);
+
+        // Verify storage info
+        assert_eq!(storage.len(), 5);
+        assert_eq!(storage.dimension(), 4);
+        assert!(!storage.is_empty());
+    }
+
+    // Test backward compatibility - existing new() should still work
+    #[test]
+    fn test_backward_compatibility() {
+        log_init_test();
+
+        // Old API should still work without any changes
+        let hnsw = Hnsw::<f32, dist::DistL1, NoStorage>::new(15, 1000, 16, 200, dist::DistL1 {});
+
+        // Insert using old API
+        hnsw.insert((&[1.0, 2.0, 3.0], 0));
+        hnsw.insert((&[4.0, 5.0, 6.0], 1));
+
+        // Search should work
+        let results = hnsw.search(&[1.0, 2.0, 3.0], 1, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].d_id, 0);
     }
 } // end of module test

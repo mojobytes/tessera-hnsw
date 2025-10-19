@@ -36,10 +36,11 @@ pub trait AnnT {
     fn file_dump(&self, path: &Path, file_basename: &str) -> anyhow::Result<String>;
 }
 
-impl<T, D> AnnT for Hnsw<'_, T, D>
+impl<'b, T, D, VS> AnnT for Hnsw<'b, T, D, VS>
 where
-    T: Serialize + DeserializeOwned + Clone + Send + Sync,
+    T: Serialize + DeserializeOwned + Clone + Send + Sync + std::fmt::Debug,
     D: Distance<T> + Send + Sync,
+    VS: crate::storage::VectorStorage<'b, T>,
 {
     type Val = T;
     //

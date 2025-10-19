@@ -105,12 +105,12 @@ impl FlatNeighborhood {
     }
 } // end impl block for FlatNeighborhood
 
-impl<T: Clone + Send + Sync, D: Distance<T> + Send + Sync> From<&Hnsw<'_, T, D>>
+impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync, VS: crate::storage::VectorStorage<'b, T>> From<&Hnsw<'b, T, D, VS>>
     for FlatNeighborhood
 {
-    /// extract from the Hnsw strucure a hashtable mapping original DataId into a FlatPoint structure gathering its neighbourhood information.  
+    /// extract from the Hnsw strucure a hashtable mapping original DataId into a FlatPoint structure gathering its neighbourhood information.
     /// Useful after reloading from a dump with T=NoData and D = NoDist as points are then reloaded with neighbourhood information only.
-    fn from(hnsw: &Hnsw<T, D>) -> Self {
+    fn from(hnsw: &Hnsw<'b, T, D, VS>) -> Self {
         let mut hash_t = HashMap::new();
         let pt_iter = hnsw.get_point_indexation().into_iter();
         //
