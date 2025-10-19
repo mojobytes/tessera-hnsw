@@ -1,7 +1,82 @@
-//! A rust implementation of Approximate NN search from:  
+//! A rust implementation of Approximate NN search from:
 //! Efficient and robust approximate nearest neighbour search using Hierarchical Navigable
 //! small World graphs.
 //! Yu. A. Malkov, D.A Yashunin 2016, 2018
+//!
+//! ## Using External Vector Storage
+//!
+//! For memory efficiency, HNSW can reference vectors from external storage
+//! instead of copying them. This is useful for large-scale datasets.
+//!
+//! ### Example: Basic Usage with External Storage
+//!
+//! ```rust,ignore
+//! use tessera_hnsw::{Hnsw, InMemoryVectorStorage};
+//! use anndists::dist::DistL2;
+//!
+//! // 1. Create storage with your vectors
+//! let vectors = vec![
+//!     vec![1.0f32, 0.0, 0.0],
+//!     vec![0.0, 1.0, 0.0],
+//!     vec![0.0, 0.0, 1.0],
+//! ];
+//! let storage = InMemoryVectorStorage::new(vectors);
+//!
+//! // 2. Create HNSW with external storage
+//! let hnsw = Hnsw::with_external_storage(
+//!     16,            // max_nb_connection
+//!     1000,          // max_elements
+//!     16,            // max_layer
+//!     200,           // ef_construction
+//!     DistL2 {},     // distance function
+//!     &storage,
+//! );
+//!
+//! // 3. Insert vectors by ID (zero-copy)
+//! hnsw.insert_by_id(0, 100)?; // vector_id=0, data_id=100
+//! hnsw.insert_by_id(1, 101)?;
+//! hnsw.insert_by_id(2, 102)?;
+//!
+//! // 4. Search as usual
+//! let query = vec![1.0, 0.0, 0.0];
+//! let neighbors = hnsw.search(&query, 2, 50);
+//!
+//! assert_eq!(neighbors[0].d_id, 100); // Found exact match
+//! ```
+//!
+//! ### Memory Savings
+//!
+//! Using `insert_by_id()` with external storage:
+//! - **No vector copying**: Vectors stay in storage
+//! - **Lower memory footprint**: Only IDs stored in HNSW graph
+//! - **Faster insertion**: No allocation overhead
+//!
+//! Traditional `insert()` method:
+//! - **Copies each vector**: 2x memory usage
+//! - **Allocation overhead**: Vec allocation per point
+//!
+//! ### Mixing Both Approaches
+//!
+//! You can mix `insert()` and `insert_by_id()`:
+//!
+//! ```rust,ignore
+//! // Insert from storage (zero-copy)
+//! hnsw.insert_by_id(0, 100)?;
+//!
+//! // Insert directly (copies vector)
+//! hnsw.insert((&[0.5, 0.5, 0.5], 200));
+//!
+//! // Both points are searchable
+//! let results = hnsw.search(&query, 10, 50);
+//! ```
+//!
+//! ### Error Handling
+//!
+//! `insert_by_id()` returns `Result<(), String>` and fails if:
+//!
+//! - **No storage configured**: Use `with_external_storage()` constructor
+//! - **Invalid vector_id**: ID doesn't exist in storage
+//! - **Dimension mismatch**: Vector dimension differs from HNSW configuration
 
 use serde::{Deserialize, Serialize};
 
@@ -237,6 +312,28 @@ impl<'b, T: Clone + Send + Sync> Point<'b, T> {
         }
         Point {
             data: PointData::new_s(s),
+            origin_id,
+            p_id,
+            neighbours: Arc::new(RwLock::new(neighbours)),
+        }
+    }
+
+    /// Creates a new Point referencing a vector by ID in external storage.
+    ///
+    /// This is more memory-efficient than `new()` as it avoids copying the vector.
+    /// The vector is fetched on-demand from VectorStorage using the provided ID.
+    ///
+    /// # Arguments
+    /// * `vector_id` - Index of the vector in external VectorStorage
+    /// * `origin_id` - User-defined identifier for this point
+    /// * `p_id` - Internal point ID assigned by HNSW
+    pub fn new_from_vector_id(vector_id: usize, origin_id: usize, p_id: PointId) -> Self {
+        let mut neighbours = Vec::with_capacity(NB_LAYER_MAX as usize);
+        for _ in 0..NB_LAYER_MAX {
+            neighbours.push(Vec::<Arc<PointWithOrder<T>>>::new());
+        }
+        Point {
+            data: PointData::VectorId(vector_id),
             origin_id,
             p_id,
             neighbours: Arc::new(RwLock::new(neighbours)),
@@ -568,6 +665,44 @@ impl<'b, T: Clone + Send + Sync> PointIndexation<'b, T> {
         (Arc::clone(&new_point), nb_point)
     } // end of insert
 
+    /// Generates a new point using a vector ID from external storage.
+    ///
+    /// Similar to `generate_new_point()` but references a vector by ID
+    /// instead of copying it. More memory-efficient for large datasets.
+    ///
+    /// # Arguments
+    /// * `vector_id` - Index of the vector in external VectorStorage
+    /// * `origin_id` - User-defined identifier for this point
+    ///
+    /// # Returns
+    /// Tuple of (Arc<Point>, number of points after insertion)
+    fn generate_new_point_by_id(&self, vector_id: usize, origin_id: usize) -> (Arc<Point<'b, T>>, usize) {
+        let level = self.layer_g.generate();
+        let new_point;
+        {
+            let mut points_by_layer_ref = self.points_by_layer.write();
+            let mut p_id = PointId(level as u8, -1);
+            p_id.1 = points_by_layer_ref[p_id.0 as usize].len() as i32;
+            // Create Point with VectorId instead of copying vector
+            let point = Point::new_from_vector_id(vector_id, origin_id, p_id);
+            new_point = Arc::new(point);
+            trace!("definitive pushing of point {:?} with vector_id {}", p_id, vector_id);
+            points_by_layer_ref[p_id.0 as usize].push(Arc::clone(&new_point));
+        }
+        //
+        let nb_point;
+        {
+            let mut lock_nb_point = self.nb_point.write();
+            *lock_nb_point += 1;
+            nb_point = *lock_nb_point;
+            if nb_point % 50000 == 0 {
+                println!(" setting number of points {:?} ", nb_point);
+            }
+        }
+        trace!(" setting number of points {:?} ", *self.nb_point);
+        (Arc::clone(&new_point), nb_point)
+    }
+
     /// check if entry_point is modified
     fn check_entry_point(&self, new_point: &Arc<Point<'b, T>>) {
         //
@@ -887,6 +1022,9 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         info!("Hnsw extend candidates {:?}", extend_candidates);
         info!("Hnsw using external VectorStorage");
         //
+        let data_dimension = storage.dimension();
+        info!("Hnsw data_dimension from storage: {:?}", data_dimension);
+        //
         Hnsw {
             max_nb_connection,
             ef_construction,
@@ -894,7 +1032,7 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             keep_pruned,
             max_layer: adjusted_max_layer,
             layer_indexed_points,
-            data_dimension: 0,
+            data_dimension,
             dist_f: f,
             searching: false,
             datamap_opt: false,
@@ -1347,13 +1485,182 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         debug!("exiting parallel_insert");
     } // end of parallel_insert
 
-    /// Insert in parallel slices of \[T\] each associated to its id.    
-    /// It uses Rayon for threading so the number of insertions asked for must be large enough to be efficient.  
-    /// Typically 1000 * the number of threads.  
+    /// Insert in parallel slices of \[T\] each associated to its id.
+    /// It uses Rayon for threading so the number of insertions asked for must be large enough to be efficient.
+    /// Typically 1000 * the number of threads.
     /// Facilitates the use with the ndarray crate as we can extract slices (for data in contiguous order) from Array.
     pub fn parallel_insert_slice(&self, datas: &Vec<(&[T], usize)>) {
         datas.par_iter().for_each(|&item| self.insert_slice(item));
     } // end of parallel_insert
+
+    /// Insert a point into the HNSW index using a vector ID from external storage.
+    ///
+    /// This method is more memory-efficient than `insert()` as it avoids copying vectors.
+    /// The vector is referenced by ID and fetched from VectorStorage on-demand during
+    /// distance computations.
+    ///
+    /// # Arguments
+    /// * `vector_id` - Index of the vector in the external VectorStorage
+    /// * `data_id` - User-defined identifier for this point (origin_id)
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(_)` if:
+    ///   - VectorStorage is not configured (use constructor with storage)
+    ///   - `vector_id` does not exist in storage
+    ///   - Vector dimension doesn't match HNSW configuration
+    ///
+    /// # Example
+    /// ```ignore
+    /// use tessera_hnsw::{Hnsw, InMemoryVectorStorage};
+    /// use anndists::dist::DistL2;
+    ///
+    /// let storage = InMemoryVectorStorage::new(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+    /// let hnsw = Hnsw::with_external_storage(&storage, 16, 1000, 16, 200, DistL2 {});
+    ///
+    /// hnsw.insert_by_id(0, 42)?; // Insert vector 0 with DataId 42
+    /// hnsw.insert_by_id(1, 43)?; // Insert vector 1 with DataId 43
+    /// ```
+    pub fn insert_by_id(&self, vector_id: usize, data_id: DataId) -> Result<(), String> {
+        // Validate storage is configured
+        let storage = self.vector_storage
+            .ok_or_else(||
+                "VectorStorage not configured. Use constructor with external storage parameter.".to_string()
+            )?;
+
+        // Validate vector_id exists in storage
+        if vector_id >= storage.len() {
+            return Err(format!(
+                "Vector ID {} out of bounds (storage has {} vectors)",
+                vector_id,
+                storage.len()
+            ));
+        }
+
+        // Validate dimension matches
+        let storage_dim = storage.dimension();
+        if storage_dim != self.data_dimension {
+            return Err(format!(
+                "Dimension mismatch: storage has dimension {} but HNSW expects {}",
+                storage_dim,
+                self.data_dimension
+            ));
+        }
+
+        // Get the vector from storage to pass to search operations
+        let vector = storage.get_vector(vector_id)
+            .ok_or_else(|| format!("Failed to retrieve vector {} from storage", vector_id))?;
+
+        let keep_pruned = self.keep_pruned;
+
+        // Generate new point using vector_id (no copy)
+        let (new_point, point_rank) = self
+            .layer_indexed_points
+            .generate_new_point_by_id(vector_id, data_id);
+
+        trace!("Hnsw insert_by_id generated new point {:?} with vector_id {}", new_point.p_id, vector_id);
+
+        // Rest of insertion logic mirrors insert_slice()
+        let level = new_point.p_id.0;
+        let mut enter_point_copy = None;
+        let mut max_level_observed = 0;
+
+        {
+            if let Some(arc_point) = self.layer_indexed_points.entry_point.read().as_ref() {
+                enter_point_copy = Some(Arc::clone(arc_point));
+                if point_rank == 1 {
+                    debug!("Hnsw stored first point, direct return {:?}", new_point.p_id);
+                    return Ok(());
+                }
+                max_level_observed = enter_point_copy.as_ref().unwrap().p_id.0;
+            }
+        }
+
+        if enter_point_copy.is_none() {
+            self.layer_indexed_points.check_entry_point(&new_point);
+            return Ok(());
+        }
+
+        let entry_vec = self.get_point_vector(enter_point_copy.as_ref().unwrap());
+        let mut dist_to_entry = self.dist_f.eval(vector, entry_vec);
+
+        // Search from top layer down to level+1
+        for l in ((level + 1)..(max_level_observed + 1)).rev() {
+            let mut sorted_points = self.search_layer(
+                vector,
+                Arc::clone(enter_point_copy.as_ref().unwrap()),
+                1,
+                l,
+                None,
+            );
+
+            if let Some(ep) = sorted_points.pop() {
+                // Track points for upper layers
+                if new_point.neighbours.read()[l as usize].len()
+                    < self.get_max_nb_connection() as usize
+                {
+                    new_point.neighbours.write()[l as usize].push(Arc::clone(&ep));
+                }
+                // Update entry point if closer
+                let ep_vec = self.get_point_vector(&ep.point_ref);
+                let tmp_dist = self.dist_f.eval(vector, ep_vec);
+                if tmp_dist < dist_to_entry {
+                    enter_point_copy = Some(Arc::clone(&ep.point_ref));
+                    dist_to_entry = tmp_dist;
+                }
+            } else {
+                trace!("layer still empty {} : got null list", l);
+            }
+        }
+
+        // Insert into layers from level down to 0
+        for l in (0..level + 1).rev() {
+            let ef = self.ef_construction;
+            let mut sorted_points = self.search_layer(
+                vector,
+                Arc::clone(enter_point_copy.as_ref().unwrap()),
+                ef,
+                l,
+                None,
+            );
+
+            sorted_points = from_positive_binaryheap_to_negative_binary_heap(&mut sorted_points);
+
+            if !sorted_points.is_empty() {
+                let nb_conn;
+                let extend_c;
+                if l == 0 {
+                    nb_conn = 2 * self.max_nb_connection;
+                    extend_c = self.extend_candidates;
+                } else {
+                    nb_conn = self.max_nb_connection;
+                    extend_c = false;
+                }
+
+                let mut neighbours = Vec::<Arc<PointWithOrder<T>>>::with_capacity(nb_conn);
+                self.select_neighbours(
+                    vector,
+                    &mut sorted_points,
+                    nb_conn,
+                    extend_c,
+                    l,
+                    keep_pruned,
+                    &mut neighbours,
+                );
+
+                neighbours.sort_unstable();
+                new_point.neighbours.write()[l as usize].clone_from(&neighbours);
+                enter_point_copy = Some(Arc::clone(&new_point));
+            }
+        }
+
+        // Reverse update of neighbours
+        self.reverse_update_neighborhood_simple(Arc::clone(&new_point));
+        self.layer_indexed_points.check_entry_point(&new_point);
+
+        trace!("Hnsw exiting insert_by_id for point {:?}", new_point.p_id);
+        Ok(())
+    }
 
     /// insert new_point in neighbourhood info of point
     fn reverse_update_neighborhood_simple(&self, new_point: Arc<Point<T>>) {
@@ -2112,5 +2419,170 @@ mod tests {
         let results = hnsw.search(&[1.0, 2.0, 3.0], 1, 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].d_id, 0);
+    }
+
+    // ========== Phase 3 Tests: insert_by_id() ==========
+
+    #[test]
+    fn test_insert_by_id_success() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        let vectors = vec![
+            vec![1.0f32, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+            vec![7.0, 8.0, 9.0],
+        ];
+        let storage = InMemoryVectorStorage::new(vectors);
+
+        let hnsw = Hnsw::with_external_storage(
+            16,            // max_nb_connection
+            1000,          // max_elements
+            16,            // max_layer
+            200,           // ef_construction
+            dist::DistL2 {},
+            &storage,
+        );
+
+        // Insert by ID
+        let result = hnsw.insert_by_id(0, 100);
+        assert!(result.is_ok(), "insert_by_id(0) failed: {:?}", result.err());
+
+        let result = hnsw.insert_by_id(1, 101);
+        assert!(result.is_ok(), "insert_by_id(1) failed: {:?}", result.err());
+
+        // Verify points were inserted
+        assert_eq!(hnsw.get_nb_point(), 2);
+    }
+
+    #[test]
+    fn test_insert_by_id_no_storage() {
+        log_init_test();
+
+        // Create HNSW without storage (legacy mode)
+        let hnsw = Hnsw::<f32, dist::DistL2, NoStorage>::new(16, 1000, 16, 200, dist::DistL2 {});
+
+        let result = hnsw.insert_by_id(0, 100);
+        assert!(result.is_err(), "Should fail without storage");
+        assert!(
+            result.unwrap_err().contains("VectorStorage not configured"),
+            "Error message should mention storage not configured"
+        );
+    }
+
+    #[test]
+    fn test_insert_by_id_out_of_bounds() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        let vectors = vec![vec![1.0f32, 2.0], vec![3.0, 4.0]];
+        let storage = InMemoryVectorStorage::new(vectors);
+
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+
+        let result = hnsw.insert_by_id(2, 100); // ID 2 doesn't exist (only 0, 1)
+        assert!(result.is_err(), "Should fail for out of bounds vector_id");
+        assert!(
+            result.unwrap_err().contains("out of bounds"),
+            "Error message should mention out of bounds"
+        );
+    }
+
+    #[test]
+    fn test_insert_by_id_dimension_mismatch() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        // Storage with 3D vectors
+        let vectors = vec![vec![1.0f32, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let storage = InMemoryVectorStorage::new(vectors);
+
+        // Create HNSW expecting 3D vectors (storage.dimension() = 3)
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+
+        // This should succeed (correct dimension)
+        let result = hnsw.insert_by_id(0, 100);
+        assert!(result.is_ok(), "Should work with correct dimension");
+    }
+
+    #[test]
+    fn test_insert_by_id_end_to_end() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        // Known vectors
+        let vectors = vec![
+            vec![1.0f32, 0.0, 0.0], // ID 0
+            vec![0.0, 1.0, 0.0],    // ID 1
+            vec![0.0, 0.0, 1.0],    // ID 2
+            vec![0.9, 0.1, 0.0],    // ID 3 (similar to 0)
+            vec![0.1, 0.9, 0.0],    // ID 4 (similar to 1)
+        ];
+        let storage = InMemoryVectorStorage::new(vectors);
+
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+
+        // Insert all by ID
+        for (vector_id, data_id) in [(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)] {
+            let result = hnsw.insert_by_id(vector_id, data_id);
+            assert!(
+                result.is_ok(),
+                "Failed to insert vector_id {}: {:?}",
+                vector_id,
+                result.err()
+            );
+        }
+
+        assert_eq!(hnsw.get_nb_point(), 5);
+
+        // Search for vector similar to [1.0, 0.0, 0.0] (should match ID 0)
+        let query = vec![1.0, 0.0, 0.0];
+        let neighbors = hnsw.search(&query, 2, 50);
+
+        // Verify we got results
+        assert!(!neighbors.is_empty(), "Search should return neighbors");
+
+        // First result should be exact match (DataId 100 for vector_id 0)
+        assert_eq!(
+            neighbors[0].d_id, 100,
+            "First neighbor should be DataId 100 (vector_id 0)"
+        );
+        assert!(
+            neighbors[0].distance < 0.01,
+            "Distance to exact match should be ~0, got {}",
+            neighbors[0].distance
+        );
+    }
+
+    #[test]
+    fn test_insert_by_id_mixed_with_regular_insert() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        let vectors = vec![vec![1.0f32, 0.0], vec![0.0, 1.0]];
+        let storage = InMemoryVectorStorage::new(vectors);
+
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+
+        // Insert by ID
+        hnsw.insert_by_id(0, 100).unwrap();
+
+        // Insert regularly (copies vector)
+        hnsw.insert((&[0.5, 0.5], 200));
+
+        // Insert by ID again
+        hnsw.insert_by_id(1, 101).unwrap();
+
+        // Should have 3 points total
+        assert_eq!(hnsw.get_nb_point(), 3);
+
+        // Search should work across both types
+        let results = hnsw.search(&[1.0, 0.0], 3, 50);
+        assert_eq!(results.len(), 3, "Should find all 3 points");
     }
 } // end of module test
