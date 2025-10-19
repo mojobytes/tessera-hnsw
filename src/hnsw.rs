@@ -38,8 +38,20 @@ use crate::storage::VectorStorage;
 #[derive(Default, Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct NoData;
 
-/// Marker type for Hnsw without external vector storage (legacy mode).
-/// When used as the VS generic parameter, Hnsw stores vectors internally in Points.
+/// Marker type indicating no external vector storage.
+///
+/// When using `NoStorage`, vectors are embedded directly in Points (legacy mode).
+/// This is the default behavior when external storage is not needed.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use tessera_hnsw::{Hnsw, NoStorage};
+/// use anndists::dist::DistL2;
+///
+/// // Vectors stored internally (no external storage)
+/// let hnsw: Hnsw<f32, DistL2, NoStorage> = Hnsw::new(15, 1000, 16, 200, DistL2 {});
+/// ```
 #[derive(Default, Clone, Copy, Debug)]
 pub struct NoStorage;
 
@@ -891,7 +903,17 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
     } // end of new_with_storage
 
     /// Helper method to get vector data from a Point, accounting for VectorStorage.
+    ///
     /// This abstracts away whether vectors are stored internally or externally.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - Point has VectorId but no storage is configured (programming error)
+    /// - Vector ID not found in storage (data corruption or programming error)
+    ///
+    /// These conditions indicate a serious programming error that should be fixed,
+    /// not handled at runtime.
     #[inline]
     fn get_point_vector<'a>(&'a self, point: &'a Point<'b, T>) -> &'a [T] {
         match &point.data {
@@ -900,9 +922,9 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             PointData::VectorId(id) => {
                 // We must have VectorStorage if PointData is VectorId
                 self.vector_storage
-                    .expect("VectorStorage required for VectorId points")
+                    .expect("Point has VectorId but no storage configured - this is a programming error")
                     .get_vector(*id)
-                    .expect("Vector not found in storage")
+                    .unwrap_or_else(|| panic!("Vector ID {} not found in storage - possible data corruption", id))
             }
         }
     }
@@ -1736,6 +1758,68 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         answers
     } // end of insert_parallel
 } // end of Hnsw
+
+// Convenience constructors (separate impl to allow different VS type parameter)
+impl<'b, T, D> Hnsw<'b, T, D, NoStorage>
+where
+    T: Clone + Send + Sync + std::fmt::Debug,
+    D: Distance<T> + Send + Sync,
+{
+    /// Convenience constructor for HNSW with external vector storage.
+    ///
+    /// This method avoids turbofish syntax by inferring the VectorStorage type
+    /// from the `storage` parameter. This is particularly useful when working
+    /// with concrete storage types.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use tessera_hnsw::Hnsw;
+    /// use tessera_hnsw::storage::InMemoryVectorStorage;
+    /// use anndists::dist::DistL2;
+    ///
+    /// let vectors = vec![vec![1.0f32, 2.0], vec![3.0, 4.0]];
+    /// let storage = InMemoryVectorStorage::new(vectors);
+    ///
+    /// // No turbofish needed - storage type is inferred!
+    /// let hnsw = Hnsw::with_external_storage(
+    ///     15,           // max_nb_connection
+    ///     1000,         // max_elements
+    ///     16,           // max_layer
+    ///     200,          // ef_construction
+    ///     DistL2 {},    // distance
+    ///     &storage      // storage (type inferred)
+    /// );
+    /// ```
+    ///
+    /// Compare with the traditional approach:
+    ///
+    /// ```rust,ignore
+    /// // Requires explicit type annotation (turbofish)
+    /// let hnsw: Hnsw<f32, DistL2, InMemoryVectorStorage<f32>> =
+    ///     Hnsw::new_with_storage(15, 1000, 16, 200, DistL2 {}, &storage);
+    /// ```
+    pub fn with_external_storage<VS>(
+        max_nb_connection: usize,
+        max_elements: usize,
+        max_layer: usize,
+        ef_construction: usize,
+        f: D,
+        storage: &'b VS,
+    ) -> Hnsw<'b, T, D, VS>
+    where
+        VS: VectorStorage<'b, T>,
+    {
+        Hnsw::new_with_storage(
+            max_nb_connection,
+            max_elements,
+            max_layer,
+            ef_construction,
+            f,
+            storage,
+        )
+    }
+}
 
 // This function takes a binary heap with points declared with a negative distance
 // and returns a vector of points with their correct positive distance to some reference distance
