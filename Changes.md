@@ -1,3 +1,19 @@
+- version 0.3.3 (tessera-hnsw fork - Phase 3)
+
+  **VectorStorage trait integration - Backward compatibility updates**:
+  - Fixed compilation errors in tests caused by new generic parameter `VS: VectorStorage`
+  - Updated all test files to use explicit type annotations with `NoStorage`
+  - Maintains full backward compatibility with existing code via `NoStorage` default parameter
+  - All 32 tests passing (27 lib + 3 filter + 2 serpar)
+
+  **Test updates**:
+  - `deallocation_test.rs`: Added turbofish syntax for `Hnsw::<f32, DistL1, NoStorage>`
+  - `filtertest.rs`: Updated all HNSW instantiations with `NoStorage` type parameter
+  - No breaking changes to public API
+
+  **Note**: Phase 2 (VectorStorage trait) was previously completed. This phase focuses on
+  ensuring existing tests compile and pass with the new generic parameter.
+
 - version 0.3.2
   update dependencies to ndarray 0.16 , rand 0.9  indexmap 2.9, hdf5. edition=2024
 

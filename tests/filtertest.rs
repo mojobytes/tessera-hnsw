@@ -26,7 +26,7 @@ fn generate_random_string(len: usize) -> String {
 // this function uses a sorted vector as a filter
 fn search_closure_filter(
     word: &str,
-    hns: &Hnsw<u16, DistLevenshtein>,
+    hns: &Hnsw<u16, DistLevenshtein, NoStorage>,
     words: &[String],
     filter_vector: &[usize],
 ) {
@@ -55,7 +55,7 @@ fn filter_levenstein() {
     let max_nb_connection = 15;
     let nb_layer = 16.min((nb_elem as f32).ln().trunc() as usize);
     let ef_c = 200;
-    let hns = Hnsw::<u16, DistLevenshtein>::new(
+    let hns = Hnsw::<u16, DistLevenshtein, NoStorage>::new(
         max_nb_connection,
         nb_elem,
         nb_layer,
@@ -77,7 +77,7 @@ fn filter_levenstein() {
     }
     // Create a sorted vector of ids
     // the ids in the vector will be used as a filter
-    let filtered_hns = Hnsw::<u16, DistLevenshtein>::new(
+    let filtered_hns = Hnsw::<u16, DistLevenshtein, NoStorage>::new(
         max_nb_connection,
         nb_elem,
         nb_layer,
@@ -168,7 +168,7 @@ fn filter_l2() {
     let ef_c = 200;
     let max_nb_connection = 15;
     let nb_layer = 16.min((nb_elem as f32).ln().trunc() as usize);
-    let hnsw = Hnsw::<f32, DistL2>::new(max_nb_connection, nb_elem, nb_layer, ef_c, DistL2 {});
+    let hnsw = Hnsw::<f32, DistL2, NoStorage>::new(max_nb_connection, nb_elem, nb_layer, ef_c, DistL2 {});
     hnsw.parallel_insert(&data_with_id);
 
     //
@@ -179,7 +179,7 @@ fn filter_l2() {
     // Create a sorted vector of ids
     // the ids in the vector will be used as a filter
     let filtered_hns =
-        Hnsw::<f32, DistL2>::new(max_nb_connection, nb_elem, nb_layer, ef_c, DistL2 {});
+        Hnsw::<f32, DistL2, NoStorage>::new(max_nb_connection, nb_elem, nb_layer, ef_c, DistL2 {});
     let mut filter_vector: Vec<usize> = Vec::new();
     for i in 300..400 {
         filter_vector.push(i);
@@ -222,7 +222,7 @@ fn filter_villsnow() {
     log_init_test();
     //
     let grid_size = 100;
-    let mut hnsw = Hnsw::<f64, DistL2>::new(4, grid_size * grid_size, 16, 100, DistL2::default());
+    let mut hnsw = Hnsw::<f64, DistL2, NoStorage>::new(4, grid_size * grid_size, 16, 100, DistL2::default());
     let mut points = HashMap::new();
 
     {

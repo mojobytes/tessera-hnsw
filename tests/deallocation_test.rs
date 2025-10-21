@@ -1,7 +1,7 @@
 use env_logger::Builder;
 
 use anndists::dist::DistL1;
-use tessera_hnsw::hnsw::Hnsw;
+use tessera_hnsw::hnsw::{Hnsw, NoStorage};
 
 // A test program to see if memory from insertions gets deallocated.
 // This program sets up a process that iteratively builds a new model and lets it go out of scope.
@@ -12,7 +12,7 @@ fn main() {
     //
     let mut counter: usize = 0;
     loop {
-        let hnsw: Hnsw<f32, DistL1> = Hnsw::new(15, 100_000, 20, 500_000, DistL1 {});
+        let hnsw = Hnsw::<f32, DistL1, NoStorage>::new(15, 100_000, 20, 500_000, DistL1 {});
         let s1 = [1.0, 0.0, 0.0, 0.0];
         hnsw.insert_slice((&s1, 0));
         let s2 = [0.0, 1.0, 1.0];
