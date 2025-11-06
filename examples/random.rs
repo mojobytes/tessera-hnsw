@@ -6,7 +6,7 @@ use rand::distr::Uniform;
 use rand::prelude::*;
 use std::time::{Duration, SystemTime};
 
-use anndists::dist::*;
+use tessera_hnsw::distance::*;
 use tessera_hnsw::prelude::*;
 
 fn main() {

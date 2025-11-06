@@ -328,7 +328,7 @@ mod tests {
     use super::*;
 
     use crate::hnswio::HnswIo;
-    use anndists::dist::*;
+    use crate::distance::*;
 
     pub use crate::api::AnnT;
     use crate::prelude::*;

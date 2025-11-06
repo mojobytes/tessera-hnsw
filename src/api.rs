@@ -7,7 +7,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::hnsw::*;
 use crate::hnswio::*;
-use anndists::dist::distances::Distance;
+use crate::distance::Distance;
 use log::info;
 
 pub trait AnnT {

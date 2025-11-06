@@ -14,9 +14,7 @@ pub mod hnswio;
 pub mod libext;
 pub mod prelude;
 pub mod storage;
-
-// we impose our version of anndists
-pub use anndists;
+pub mod distance;  // simsimd-based distance functions
 
 lazy_static! {
     static ref LOG: u64 = init_log();

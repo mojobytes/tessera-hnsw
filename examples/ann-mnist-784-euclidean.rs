@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime};
 // 24 core Core(TM) i9-13900HX simdeez with modify_level_scale at 0.5
 //     24           400         24           0.5              0          0      0.990        58722        1.000
 
-use anndists::dist::*;
+use tessera_hnsw::distance::*;
 use tessera_hnsw::prelude::*;
 use log::info;
 

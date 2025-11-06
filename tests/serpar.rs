@@ -10,7 +10,7 @@ use rand::prelude::*;
 
 use skiplist::OrderedSkipList;
 
-use anndists::dist;
+use tessera_hnsw::distance;
 use tessera_hnsw::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -44,7 +44,8 @@ fn brute_force_neighbours<T: Serialize + DeserializeOwned + Copy + Send + Sync>(
     let mut more = true;
     while more {
         if let Some(point) = ptiter.next() {
-            let dist_p = distance.eval(data, point.get_v());
+            let dist_p = distance.eval(data, point.get_v())
+                .expect("Distance calculation should succeed in brute force search");
             let ordered_point = PointIdWithOrder::new(point.get_point_id(), dist_p);
             //            log::debug!(" brute force inserting {:?}", ordered_point);
             if neighbours.len() < nb_neighbours {
@@ -67,7 +68,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use dist::l2_normalize;
+    use tessera_hnsw::distance::l2_normalize;
 
     #[test]
     fn test_serial() {
@@ -87,12 +88,12 @@ mod tests {
         let ef_c = 400;
         let max_nb_connection = 32;
         let nb_layer = 16.min((nb_elem as f32).ln().trunc() as usize);
-        let mut hns = Hnsw::<f32, dist::DistL1>::new(
+        let mut hns = Hnsw::<f32, distance::DistL1>::new(
             max_nb_connection,
             nb_elem,
             nb_layer,
             ef_c,
-            dist::DistL1 {},
+            distance::DistL1 {},
         );
         hns.set_extend_candidates(true);
         hns.set_keeping_pruned(true);
@@ -128,7 +129,7 @@ mod tests {
             let brute_neighbours = brute_force_neighbours(
                 knbn,
                 hns.get_point_indexation(),
-                Box::new(dist::DistL1 {}),
+                Box::new(distance::DistL1 {}),
                 &r_vec,
             );
             cpu_time = start.elapsed();
@@ -205,12 +206,12 @@ mod tests {
         }
         let data_with_id = data.iter().zip(0..data.len()).collect::<Vec<_>>();
         let nb_layer = 16.min((nb_elem as f32).ln().trunc() as usize);
-        let mut hns = Hnsw::<f32, dist::DistDot>::new(
+        let mut hns = Hnsw::<f32, distance::DistDot>::new(
             max_nb_connection,
             nb_elem,
             nb_layer,
             ef_c,
-            dist::DistDot {},
+            distance::DistDot {},
         );
         // !
         //   hns.set_extend_candidates(true);
@@ -251,7 +252,7 @@ mod tests {
             let brute_neighbours = brute_force_neighbours(
                 knbn,
                 hns.get_point_indexation(),
-                Box::new(dist::DistDot),
+                Box::new(distance::DistDot),
                 &r_vec,
             );
             cpu_time = start.elapsed();

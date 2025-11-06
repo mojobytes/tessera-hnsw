@@ -1,6 +1,6 @@
 use env_logger::Builder;
 
-use anndists::dist::DistL1;
+use tessera_hnsw::distance::DistL1;
 use tessera_hnsw::hnsw::{Hnsw, NoStorage};
 
 // A test program to see if memory from insertions gets deallocated.

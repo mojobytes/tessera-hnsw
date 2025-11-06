@@ -8,7 +8,7 @@ readme = "README.md"
 keywords = ["algorithms", "ann", "hnsw", "tessera", "vector-database"]
 repository = "https://github.com/mojobytes/tessera-hnsw"
 documentation = "https://docs.rs/tessera-hnsw"
-edition = "2024"
+edition = "2021"
 
 [package.metadata]
 upstream = "https://github.com/jean-pierreBoth/hnswlib-rs"
@@ -91,8 +91,9 @@ env_logger = { version = "0.11" }
 anyhow = { version = "1.0" }
 
 # anndists = { path = "../anndists" }
-anndists = { version = "0.1" }
+anndists = { version = "0.1", optional = true }  # Keep for fallback distances
 # anndists = { git = "https://github.com/jean-pierreBoth/anndists" }
+simsimd = "6.5"  # High-performance SIMD distance calculations
 
 # for benchmark reading, so the lbrary do not depend on hdf5 nor ndarray
 [dev-dependencies]
@@ -111,7 +112,10 @@ itertools = {version = "0.14"}
 
 default = []
 
-# feature for std simd on nightly
-stdsimd = ["anndists/stdsimd"]
-# feature for simd on stable for x86*
-simdeez_f = ["anndists/simdeez_f"]
+# feature to include anndists fallback distances (requires nightly)
+anndists-fallback = ["anndists"]
+
+# feature for std simd on nightly (requires anndists-fallback)
+stdsimd = ["anndists-fallback", "anndists/stdsimd"]
+# feature for simd on stable for x86* (requires anndists-fallback)
+simdeez_f = ["anndists-fallback", "anndists/simdeez_f"]

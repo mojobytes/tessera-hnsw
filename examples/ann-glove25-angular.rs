@@ -58,7 +58,7 @@ use std::time::{Duration, SystemTime};
 //  24            800        128            0.5            1          0          0.974        16521     1.002
 //  48            800        128            0.5            1          0          0.985        11484     1.001
 
-use anndists::dist::*;
+use tessera_hnsw::distance::*;
 use tessera_hnsw::prelude::*;
 use log::info;
 

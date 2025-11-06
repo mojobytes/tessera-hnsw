@@ -10,7 +10,7 @@ use hashbrown::HashMap;
 use std::cmp::Ordering;
 
 use crate::hnsw;
-use anndists::dist::distances::Distance;
+use crate::distance::Distance;
 use hnsw::*;
 use log::error;
 
@@ -130,7 +130,7 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
 mod tests {
 
     use super::*;
-    use anndists::dist::distances::*;
+    use crate::distance::*;
     use log::debug;
 
     use crate::api::AnnT;

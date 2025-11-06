@@ -37,7 +37,7 @@ use rand::Rng;
 use anyhow::*;
 use std::any::type_name;
 
-use anndists::dist::distances::*;
+use crate::distance::*;
 
 use self::hnsw::*;
 use crate::datamap::*;
@@ -1397,7 +1397,7 @@ mod tests {
     use super::*;
 
     pub use crate::api::AnnT;
-    use anndists::dist;
+    use crate::distance;
     use log::error;
 
     use rand::distr::{Distribution, Uniform};
@@ -1433,12 +1433,12 @@ mod tests {
         // define hnsw
         let ef_construct = 25;
         let nb_connection = 10;
-        let hnsw = Hnsw::<f32, dist::DistL1>::new(
+        let hnsw = Hnsw::<f32, distance::DistL1>::new(
             nb_connection,
             nbcolumn,
             16,
             ef_construct,
-            dist::DistL1 {},
+            distance::DistL1 {},
         );
         for (i, d) in data.iter().enumerate() {
             hnsw.insert((d, i));
@@ -1482,8 +1482,8 @@ mod tests {
         // define hnsw
         let ef_construct = 25;
         let nb_connection = 10;
-        let mydist = dist::DistPtr::<f32, f32>::new(my_fn);
-        let hnsw = Hnsw::<f32, dist::DistPtr<f32, f32>>::new(
+        let mydist = distance::DistPtr::<f32, f32>::new(my_fn);
+        let hnsw = Hnsw::<f32, distance::DistPtr<f32, f32>>::new(
             nb_connection,
             nbcolumn,
             16,
@@ -1504,7 +1504,7 @@ mod tests {
         // reload
         debug!("HNSW reload");
         let reloader = HnswIo::new(directory.path(), fname);
-        let mydist = dist::DistPtr::<f32, f32>::new(my_fn);
+        let mydist = distance::DistPtr::<f32, f32>::new(my_fn);
         let _hnsw_loaded: Hnsw<f32, DistPtr<f32, f32>> =
             reloader.load_hnsw_with_dist(mydist).unwrap();
     } // end of test_dump_reload_myfn
@@ -1531,12 +1531,12 @@ mod tests {
         // define hnsw
         let ef_construct = 25;
         let nb_connection = 10;
-        let hnsw = Hnsw::<f32, dist::DistL1>::new(
+        let hnsw = Hnsw::<f32, distance::DistL1>::new(
             nb_connection,
             nbcolumn,
             16,
             ef_construct,
-            dist::DistL1 {},
+            distance::DistL1 {},
         );
         for (i, d) in data.iter().enumerate() {
             hnsw.insert((d, i));
@@ -1583,12 +1583,12 @@ mod tests {
         // define hnsw
         let ef_construct = 25;
         let nb_connection = 10;
-        let hnsw = Hnsw::<f32, dist::DistL1>::new(
+        let hnsw = Hnsw::<f32, distance::DistL1>::new(
             nb_connection,
             nbcolumn,
             16,
             ef_construct,
-            dist::DistL1 {},
+            distance::DistL1 {},
         );
         for (i, d) in data.iter().enumerate() {
             hnsw.insert((d, i));
@@ -1693,7 +1693,7 @@ mod tests {
         let ef_construct = 25;
         let nb_connection = 10;
         let hnsw =
-            Hnsw::<f32, dist::DistL1>::new(nb_connection, 0, 16, ef_construct, dist::DistL1 {});
+            Hnsw::<f32, distance::DistL1>::new(nb_connection, 0, 16, ef_construct, distance::DistL1 {});
         let fname = "empty_db";
         let directory = tempfile::tempdir()?;
         let _res = hnsw.file_dump(directory.path(), fname);

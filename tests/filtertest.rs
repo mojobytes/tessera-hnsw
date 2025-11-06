@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::range_zip_with_len)]
 
-use anndists::dist::*;
+use tessera_hnsw::distance::*;
 use tessera_hnsw::prelude::*;
 use rand::{Rng, distr::Uniform};
 use std::iter;
@@ -24,6 +24,7 @@ fn generate_random_string(len: usize) -> String {
 }
 
 // this function uses a sorted vector as a filter
+#[cfg(feature = "anndists-fallback")]
 fn search_closure_filter(
     word: &str,
     hns: &Hnsw<u16, DistLevenshtein, NoStorage>,
@@ -50,6 +51,7 @@ fn search_closure_filter(
 }
 
 #[test]
+#[cfg(feature = "anndists-fallback")]
 fn filter_levenstein() {
     let nb_elem = 500000; // number of possible words in the dictionary
     let max_nb_connection = 15;
@@ -240,7 +242,8 @@ fn filter_villsnow() {
     {
         println!("first case");
         // first case
-        let filter = |id: &usize| DistL2::default().eval(&points[id], &[1.0, 1.0]) < 1e-2;
+        let filter = |id: &usize| DistL2::default().eval(&points[id], &[1.0, 1.0])
+            .expect("Distance calculation should succeed") < 1e-2;
         dbg!(points.keys().filter(|x| filter(x)).count()); // -> 1
 
         let hit = hnsw.search_filter(&[0.0, 0.0], 10, 4, Some(&filter));

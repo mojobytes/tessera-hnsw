@@ -4,7 +4,7 @@ use cpu_time::ProcessTime;
 use env_logger::Builder;
 use std::time::{Duration, SystemTime};
 
-use anndists::dist::*;
+use tessera_hnsw::distance::*;
 use log::info;
 
 // search in paralle mode 8 core i7-10875H  @2.3Ghz time 100 neighbours

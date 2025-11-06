@@ -12,7 +12,7 @@
 //!
 //! ```rust,ignore
 //! use tessera_hnsw::{Hnsw, InMemoryVectorStorage};
-//! use anndists::dist::DistL2;
+//! use anndists::distance::DistL2;
 //!
 //! // 1. Create storage with your vectors
 //! let vectors = vec![
@@ -101,7 +101,7 @@ use log::trace;
 use log::{debug, info};
 
 pub use crate::filter::FilterT;
-use anndists::dist::distances::Distance;
+use crate::distance::Distance;
 use crate::storage::VectorStorage;
 
 // TODO
@@ -122,7 +122,7 @@ pub struct NoData;
 ///
 /// ```rust,ignore
 /// use tessera_hnsw::{Hnsw, NoStorage};
-/// use anndists::dist::DistL2;
+/// use anndists::distance::DistL2;
 ///
 /// // Vectors stored internally (no external storage)
 /// let hnsw: Hnsw<f32, DistL2, NoStorage> = Hnsw::new(15, 1000, 16, 200, DistL2 {});
@@ -1207,7 +1207,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         }
         // initialize visited points
         let entry_vec = self.get_point_vector(&entry_point);
-        let dist_to_entry_point = self.dist_f.eval(point, entry_vec);
+        let dist_to_entry_point = self.dist_f.eval(point, entry_vec)
+            .expect("Distance to entry point should never fail for indexed vectors");
         trace!("       distance to entry point: {:?} ", dist_to_entry_point);
         // keep a list of id visited
         let mut visited_point_id = HashMap::<PointId, Arc<Point<T>>>::new();
@@ -1229,8 +1230,9 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             let c = candidate_points.pop().unwrap();
             // f farthest point to
             let f = return_points.peek().unwrap();
-            assert!(f.dist_to_ref >= 0.);
-            assert!(c.dist_to_ref <= 0.);
+            // Note: These assertions removed because some distance metrics (e.g., DistDot) can return negative values
+            // assert!(f.dist_to_ref >= 0.);
+            // assert!(c.dist_to_ref <= 0.);
             trace!(
                 "Comparaing c : {:?} f : {:?}",
                 -(c.dist_to_ref),
@@ -1282,7 +1284,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                     }
                     let f = f_opt.unwrap();
                     let e_vec = self.get_point_vector(&e.point_ref);
-                    let e_dist_to_p = self.dist_f.eval(point, e_vec);
+                    let e_dist_to_p = self.dist_f.eval(point, e_vec)
+                        .expect("Distance between indexed vectors should be valid");
                     let f_dist_to_p = f.dist_to_ref;
                     if e_dist_to_p < f_dist_to_p || return_points.len() < ef {
                         let e_prime = Arc::new(PointWithOrder::new(&e.point_ref, e_dist_to_p));
@@ -1367,7 +1370,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             return;
         }
         let entry_vec = self.get_point_vector(enter_point_copy.as_ref().unwrap());
-        let mut dist_to_entry = self.dist_f.eval(data, entry_vec);
+        let mut dist_to_entry = self.dist_f.eval(data, entry_vec)
+            .expect("Distance calculation failed: vectors in HNSW index should be valid");
         // we go from self.max_level_observed to level+1 included
         for l in ((level + 1)..(max_level_observed + 1)).rev() {
             // CAVEAT could bypass when layer empty, avoid  allocation..
@@ -1402,7 +1406,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 }
                 // get the lowest distance point
                 let ep_vec = self.get_point_vector(&ep.point_ref);
-                let tmp_dist = self.dist_f.eval(data, ep_vec);
+                let tmp_dist = self.dist_f.eval(data, ep_vec)
+                    .expect("HNSW search distance calculation failed for indexed vector");
                 if tmp_dist < dist_to_entry {
                     enter_point_copy = Some(Arc::clone(&ep.point_ref));
                     dist_to_entry = tmp_dist;
@@ -1513,7 +1518,7 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
     /// # Example
     /// ```ignore
     /// use tessera_hnsw::{Hnsw, InMemoryVectorStorage};
-    /// use anndists::dist::DistL2;
+    /// use anndists::distance::DistL2;
     ///
     /// let storage = InMemoryVectorStorage::new(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
     /// let hnsw = Hnsw::with_external_storage(&storage, 16, 1000, 16, 200, DistL2 {});
@@ -1582,7 +1587,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         }
 
         let entry_vec = self.get_point_vector(enter_point_copy.as_ref().unwrap());
-        let mut dist_to_entry = self.dist_f.eval(vector, entry_vec);
+        let mut dist_to_entry = self.dist_f.eval(vector, entry_vec)
+            .expect("Distance calculation failed: vectors in HNSW index should be valid");
 
         // Search from top layer down to level+1
         for l in ((level + 1)..(max_level_observed + 1)).rev() {
@@ -1603,7 +1609,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 }
                 // Update entry point if closer
                 let ep_vec = self.get_point_vector(&ep.point_ref);
-                let tmp_dist = self.dist_f.eval(vector, ep_vec);
+                let tmp_dist = self.dist_f.eval(vector, ep_vec)
+                    .expect("HNSW search distance calculation failed for indexed vector");
                 if tmp_dist < dist_to_entry {
                     enter_point_copy = Some(Arc::clone(&ep.point_ref));
                     dist_to_entry = tmp_dist;
@@ -1745,7 +1752,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 // just transfer taking care of signs
                 while !candidates.is_empty() {
                     let p = candidates.pop().unwrap();
-                    assert!(-p.dist_to_ref >= 0.);
+                    // Note: Assertion removed - some distance metrics (e.g., DistDot) can return negative values
+                    // assert!(-p.dist_to_ref >= 0.);
                     neighbours_vec
                         .push(Arc::new(PointWithOrder::new(&p.point_ref, -p.dist_to_ref)));
                 }
@@ -1782,7 +1790,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             );
             for (_p_id, p_point) in new_candidates_set.iter() {
                 let p_vec = self.get_point_vector(p_point);
-                let dist_topoint = self.dist_f.eval(data, p_vec);
+                let dist_topoint = self.dist_f.eval(data, p_vec)
+                    .expect("Distance calculation failed for candidate vector in neighbor selection");
                 candidates.push(Arc::new(PointWithOrder::new(p_point, -dist_topoint)));
             }
         } // end if extend_candidates
@@ -1793,12 +1802,14 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             if let Some(e_p) = candidates.pop() {
                 let mut e_to_insert = true;
                 let e_point_v = self.get_point_vector(&e_p.point_ref);
-                assert!(e_p.dist_to_ref <= 0.);
+                // Note: Assertion removed - some distance metrics can return positive values in negative heaps
+                // assert!(e_p.dist_to_ref <= 0.);
                 // is e_p the nearest to reference? data than to previous neighbours
                 if !neighbours_vec.is_empty() {
                     e_to_insert = !neighbours_vec.iter().any(|d| {
                         let d_vec = self.get_point_vector(&d.point_ref);
-                        self.dist_f.eval(e_point_v, d_vec) <= -e_p.dist_to_ref
+                        self.dist_f.eval(e_point_v, d_vec)
+                            .expect("Distance calculation failed during neighbor pruning") <= -e_p.dist_to_ref
                     });
                 }
                 if e_to_insert {
@@ -1827,7 +1838,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             while !discarded_points.is_empty() && neighbours_vec.len() < nb_neighbours_asked {
                 let best_point = discarded_points.pop().unwrap();
                 // do not forget to reverse sign
-                assert!(best_point.dist_to_ref <= 0.);
+                // Note: Assertion removed - some distance metrics can return positive values in negative heaps
+                // assert!(best_point.dist_to_ref <= 0.);
                 neighbours_vec.push(Arc::new(PointWithOrder::new(
                     &best_point.point_ref,
                     -best_point.dist_to_ref,
@@ -1871,14 +1883,16 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         }
         //
         let entry_vec = self.get_point_vector(entry_point.as_ref());
-        let mut dist_to_entry = self.dist_f.eval(data, entry_vec);
+        let mut dist_to_entry = self.dist_f.eval(data, entry_vec)
+            .expect("Distance calculation failed: vectors in HNSW index should be valid");
         for layer in (1..=entry_point.p_id.0).rev() {
             let mut neighbours = self.search_layer(data, Arc::clone(&entry_point), 1, layer, None);
             neighbours = from_positive_binaryheap_to_negative_binary_heap(&mut neighbours);
             if let Some(entry_point_tmp) = neighbours.pop() {
                 // get the lowest  distance point.
                 let tmp_vec = self.get_point_vector(&entry_point_tmp.point_ref);
-                let tmp_dist = self.dist_f.eval(data, tmp_vec);
+                let tmp_dist = self.dist_f.eval(data, tmp_vec)
+                    .expect("HNSW search distance calculation failed for indexed vector");
                 if tmp_dist < dist_to_entry {
                     entry_point = Arc::clone(&entry_point_tmp.point_ref);
                     dist_to_entry = tmp_dist;
@@ -1931,7 +1945,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         }
         //
         let entry_vec = self.get_point_vector(entry_point.as_ref());
-        let mut dist_to_entry = self.dist_f.eval(data, entry_vec);
+        let mut dist_to_entry = self.dist_f.eval(data, entry_vec)
+            .expect("Distance calculation failed: vectors in HNSW index should be valid");
         let mut pivot = Arc::clone(&entry_point);
         let mut new_pivot = None;
 
@@ -1944,7 +1959,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 for n in neighbours {
                     // get the lowest  distance point.
                     let n_vec = self.get_point_vector(&n.point_ref);
-                    let tmp_dist = self.dist_f.eval(data, n_vec);
+                    let tmp_dist = self.dist_f.eval(data, n_vec)
+                        .expect("HNSW search distance calculation failed for indexed vector");
                     if tmp_dist < dist_to_entry {
                         new_pivot = Some(Arc::clone(&n.point_ref));
                         has_changed = true;
@@ -2083,7 +2099,7 @@ where
     /// ```rust,ignore
     /// use tessera_hnsw::Hnsw;
     /// use tessera_hnsw::storage::InMemoryVectorStorage;
-    /// use anndists::dist::DistL2;
+    /// use anndists::distance::DistL2;
     ///
     /// let vectors = vec![vec![1.0f32, 2.0], vec![3.0, 4.0]];
     /// let storage = InMemoryVectorStorage::new(vectors);
@@ -2139,7 +2155,8 @@ fn from_negative_binaryheap_to_sorted_vector<'b, T: Send + Sync + Copy>(
     let mut vec_points = Vec::<Arc<PointWithOrder<T>>>::with_capacity(nb_points);
     //
     for p in heap_points.iter() {
-        assert!(p.dist_to_ref <= 0.);
+        // Note: Assertion removed - some distance metrics can return positive values in negative heaps
+        // assert!(p.dist_to_ref <= 0.);
         let reverse_p = Arc::new(PointWithOrder::new(&p.point_ref, -p.dist_to_ref));
         vec_points.push(reverse_p);
     }
@@ -2161,7 +2178,8 @@ fn from_positive_binaryheap_to_negative_binary_heap<'b, T: Send + Sync + Clone>(
     let mut negative_heap = BinaryHeap::<Arc<PointWithOrder<T>>>::with_capacity(nb_points);
     //
     for p in positive_heap.iter() {
-        assert!(p.dist_to_ref >= 0.);
+        // Note: Assertion removed - some distance metrics (e.g., DistDot) can return negative values
+        // assert!(p.dist_to_ref >= 0.);
         let reverse_p = Arc::new(PointWithOrder::new(&p.point_ref, -p.dist_to_ref));
         negative_heap.push(reverse_p);
     }
@@ -2252,7 +2270,7 @@ where
 mod tests {
 
     use super::*;
-    use anndists::dist;
+    use crate::distance;
 
     fn log_init_test() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -2281,12 +2299,12 @@ mod tests {
         let ef_construct = 25;
         let nb_connection = 10;
         let start = ProcessTime::now();
-        let hns = Hnsw::<f32, dist::DistL1, NoStorage>::new(
+        let hns = Hnsw::<f32, distance::DistL1, NoStorage>::new(
             nb_connection,
             nbcolumn,
             16,
             ef_construct,
-            dist::DistL1 {},
+            distance::DistL1 {},
         );
         for (i, d) in data.iter().enumerate() {
             hns.insert((d, i));
@@ -2329,12 +2347,12 @@ mod tests {
         let ef_construct = 25;
         let nb_connection = 10;
         let start = ProcessTime::now();
-        let hns = Hnsw::<f32, dist::DistL1, NoStorage>::new(
+        let hns = Hnsw::<f32, distance::DistL1, NoStorage>::new(
             nb_connection,
             nbcolumn,
             16,
             ef_construct,
-            dist::DistL1 {},
+            distance::DistL1 {},
         );
         for (i, d) in data.iter().enumerate() {
             hns.insert((d, i));
@@ -2367,7 +2385,7 @@ mod tests {
         log_init_test();
         //
         for _ in 0..800 {
-            let hnsw = Hnsw::<f32, dist::DistL1, NoStorage>::new(15, 100_000, 20, 500_000, dist::DistL1 {});
+            let hnsw = Hnsw::<f32, distance::DistL1, NoStorage>::new(15, 100_000, 20, 500_000, distance::DistL1 {});
             hnsw.insert((&[1.0, 0.0, 0.0, 0.0], 0));
             let result = hnsw.search(&[1.0, 0.0, 0.0, 0.0], 2, 10);
             assert_eq!(result, vec![Neighbour::new(0, 0.0, PointId(0, 0))]);
@@ -2394,8 +2412,8 @@ mod tests {
         let storage = InMemoryVectorStorage::new(vectors);
 
         // Create Hnsw with storage
-        let _hnsw: Hnsw<f32, dist::DistL2, InMemoryVectorStorage<f32>> =
-            Hnsw::new_with_storage(15, 100, 16, 200, dist::DistL2 {}, &storage);
+        let _hnsw: Hnsw<f32, distance::DistL2, InMemoryVectorStorage<f32>> =
+            Hnsw::new_with_storage(15, 100, 16, 200, distance::DistL2 {}, &storage);
 
         // Verify storage info
         assert_eq!(storage.len(), 5);
@@ -2409,7 +2427,7 @@ mod tests {
         log_init_test();
 
         // Old API should still work without any changes
-        let hnsw = Hnsw::<f32, dist::DistL1, NoStorage>::new(15, 1000, 16, 200, dist::DistL1 {});
+        let hnsw = Hnsw::<f32, distance::DistL1, NoStorage>::new(15, 1000, 16, 200, distance::DistL1 {});
 
         // Insert using old API
         hnsw.insert((&[1.0, 2.0, 3.0], 0));
@@ -2441,7 +2459,7 @@ mod tests {
             1000,          // max_elements
             16,            // max_layer
             200,           // ef_construction
-            dist::DistL2 {},
+            distance::DistL2 {},
             &storage,
         );
 
@@ -2461,7 +2479,7 @@ mod tests {
         log_init_test();
 
         // Create HNSW without storage (legacy mode)
-        let hnsw = Hnsw::<f32, dist::DistL2, NoStorage>::new(16, 1000, 16, 200, dist::DistL2 {});
+        let hnsw = Hnsw::<f32, distance::DistL2, NoStorage>::new(16, 1000, 16, 200, distance::DistL2 {});
 
         let result = hnsw.insert_by_id(0, 100);
         assert!(result.is_err(), "Should fail without storage");
@@ -2480,7 +2498,7 @@ mod tests {
         let vectors = vec![vec![1.0f32, 2.0], vec![3.0, 4.0]];
         let storage = InMemoryVectorStorage::new(vectors);
 
-        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, distance::DistL2 {}, &storage);
 
         let result = hnsw.insert_by_id(2, 100); // ID 2 doesn't exist (only 0, 1)
         assert!(result.is_err(), "Should fail for out of bounds vector_id");
@@ -2501,7 +2519,7 @@ mod tests {
         let storage = InMemoryVectorStorage::new(vectors);
 
         // Create HNSW expecting 3D vectors (storage.dimension() = 3)
-        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, distance::DistL2 {}, &storage);
 
         // This should succeed (correct dimension)
         let result = hnsw.insert_by_id(0, 100);
@@ -2524,7 +2542,7 @@ mod tests {
         ];
         let storage = InMemoryVectorStorage::new(vectors);
 
-        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, distance::DistL2 {}, &storage);
 
         // Insert all by ID
         for (vector_id, data_id) in [(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)] {
@@ -2567,7 +2585,7 @@ mod tests {
         let vectors = vec![vec![1.0f32, 0.0], vec![0.0, 1.0]];
         let storage = InMemoryVectorStorage::new(vectors);
 
-        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, dist::DistL2 {}, &storage);
+        let hnsw = Hnsw::with_external_storage(16, 1000, 16, 200, distance::DistL2 {}, &storage);
 
         // Insert by ID
         hnsw.insert_by_id(0, 100).unwrap();

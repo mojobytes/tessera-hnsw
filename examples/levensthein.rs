@@ -1,4 +1,4 @@
-use anndists::dist::*;
+use tessera_hnsw::distance::*;
 
 use tessera_hnsw::prelude::*;
 use rand::Rng;
