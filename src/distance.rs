@@ -182,6 +182,208 @@ mod tests {
         let dist = DistL2.eval(&a, &b).unwrap();
         assert!((dist - 5.196).abs() < 0.01, "Got {}", dist);
     }
+
+    // ========== Edge Case Tests ==========
+
+    #[test]
+    fn test_empty_vectors_error() {
+        let empty: Vec<f32> = vec![];
+        let non_empty = vec![1.0_f32, 2.0];
+
+        // Both empty
+        let result = DistL2.eval(&empty, &empty);
+        assert!(matches!(result, Err(DistanceError::EmptyVectors)));
+
+        // First empty
+        let result = DistL2.eval(&empty, &non_empty);
+        assert!(matches!(result, Err(DistanceError::EmptyVectors)));
+
+        // Second empty
+        let result = DistL2.eval(&non_empty, &empty);
+        assert!(matches!(result, Err(DistanceError::EmptyVectors)));
+    }
+
+    #[test]
+    fn test_length_mismatch_error() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![1.0_f32, 2.0];
+
+        let result = DistL2.eval(&a, &b);
+        assert!(matches!(
+            result,
+            Err(DistanceError::LengthMismatch { expected: 3, got: 2 })
+        ));
+
+        // Reverse direction
+        let result = DistL2.eval(&b, &a);
+        assert!(matches!(
+            result,
+            Err(DistanceError::LengthMismatch { expected: 2, got: 3 })
+        ));
+    }
+
+    #[test]
+    fn test_single_element_vectors() {
+        let a = vec![5.0_f32];
+        let b = vec![8.0_f32];
+
+        // L2: |8-5| = 3
+        let dist = DistL2.eval(&a, &b).unwrap();
+        assert!((dist - 3.0).abs() < 1e-6, "Got {}", dist);
+
+        // Same element
+        let dist = DistL2.eval(&a, &a).unwrap();
+        assert!((dist - 0.0).abs() < 1e-6, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_large_dimension_vectors() {
+        let dim = 1024;
+        let a: Vec<f32> = (0..dim).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i + 1) as f32).collect();
+
+        // Distance should be sqrt(1024) = 32
+        let dist = DistL2.eval(&a, &b).unwrap();
+        assert!((dist - 32.0).abs() < 0.01, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_negative_values() {
+        let a = vec![-1.0_f32, -2.0, -3.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+
+        // Expected: sqrt((1-(-1))^2 + (2-(-2))^2 + (3-(-3))^2) = sqrt(4 + 16 + 36) = sqrt(56) ≈ 7.48
+        let dist = DistL2.eval(&a, &b).unwrap();
+        assert!((dist - 7.48).abs() < 0.01, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_zero_vectors() {
+        let zero = vec![0.0_f32, 0.0, 0.0];
+        let non_zero = vec![3.0_f32, 4.0, 0.0];
+
+        // Distance from zero to (3, 4, 0) is 5
+        let dist = DistL2.eval(&zero, &non_zero).unwrap();
+        assert!((dist - 5.0).abs() < 1e-6, "Got {}", dist);
+
+        // Two zero vectors
+        let dist = DistL2.eval(&zero, &zero).unwrap();
+        assert!((dist - 0.0).abs() < 1e-6, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_l1_basic() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![4.0_f32, 5.0, 6.0];
+
+        // L1: |4-1| + |5-2| + |6-3| = 3 + 3 + 3 = 9
+        let dist = DistL1.eval(&a, &b).unwrap();
+        assert!((dist - 9.0).abs() < 1e-6, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_l1_negative() {
+        let a = vec![-1.0_f32, -2.0, -3.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+
+        // L1: |1-(-1)| + |2-(-2)| + |3-(-3)| = 2 + 4 + 6 = 12
+        let dist = DistL1.eval(&a, &b).unwrap();
+        assert!((dist - 12.0).abs() < 1e-6, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_cosine_orthogonal() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![0.0_f32, 1.0];
+
+        // Orthogonal vectors: cosine distance ≈ 1 (similarity = 0)
+        // simsimd's cosine() returns distance directly
+        let dist = DistCosine.eval(&a, &b).unwrap();
+        assert!((dist - 1.0).abs() < 0.1, "Got {} (expected ~1.0)", dist);
+    }
+
+    #[test]
+    fn test_dist_cosine_parallel() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![2.0_f32, 4.0, 6.0]; // Same direction
+
+        // Parallel vectors: cosine distance ≈ 0 (similarity = 1)
+        // simsimd's cosine() returns distance directly
+        let dist = DistCosine.eval(&a, &b).unwrap();
+        assert!((dist - 0.0).abs() < 0.1, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_cosine_opposite() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![-1.0_f32, -2.0, -3.0]; // Opposite direction
+
+        // Opposite vectors: cosine distance ≈ 2 (similarity = -1)
+        // simsimd's cosine() returns distance directly
+        let dist = DistCosine.eval(&a, &b).unwrap();
+        assert!((dist - 2.0).abs() < 0.1, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_dot_basic() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![4.0_f32, 5.0, 6.0];
+
+        // Dot product: 1*4 + 2*5 + 3*6 = 32, negated = -32
+        let dist = DistDot.eval(&a, &b).unwrap();
+        assert!((dist + 32.0).abs() < 1e-6, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_dot_orthogonal() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![0.0_f32, 1.0];
+
+        // Orthogonal: dot product = 0, negated = 0
+        let dist = DistDot.eval(&a, &b).unwrap();
+        assert!((dist - 0.0).abs() < 1e-6, "Got {}", dist);
+    }
+
+    #[test]
+    fn test_dist_hamming_identical() {
+        let a = vec![1_u32, 2, 3, 4];
+        let b = vec![1_u32, 2, 3, 4];
+
+        // Identical vectors: Hamming distance = 0
+        let dist = DistHamming.eval(&a, &b).unwrap();
+        assert_eq!(dist, 0.0);
+    }
+
+    #[test]
+    fn test_dist_hamming_different() {
+        let a = vec![1_u32, 2, 3, 4];
+        let b = vec![1_u32, 5, 3, 7];
+
+        // 2 different elements: Hamming distance = 2
+        let dist = DistHamming.eval(&a, &b).unwrap();
+        assert_eq!(dist, 2.0);
+    }
+
+    #[test]
+    fn test_mixed_integer_types() {
+        // u8
+        let a_u8 = vec![1_u8, 2, 3];
+        let b_u8 = vec![4_u8, 5, 6];
+        let dist = DistL2.eval(&a_u8, &b_u8).unwrap();
+        assert!((dist - 5.196).abs() < 0.01, "Got {}", dist);
+
+        // u16
+        let a_u16 = vec![1_u16, 2, 3];
+        let b_u16 = vec![4_u16, 5, 6];
+        let dist = DistL2.eval(&a_u16, &b_u16).unwrap();
+        assert!((dist - 5.196).abs() < 0.01, "Got {}", dist);
+
+        // u32
+        let a_u32 = vec![1_u32, 2, 3];
+        let b_u32 = vec![4_u32, 5, 6];
+        let dist = DistL2.eval(&a_u32, &b_u32).unwrap();
+        assert!((dist - 5.196).abs() < 0.01, "Got {}", dist);
+    }
 }
 
 /// Manhattan distance (L1)
@@ -223,7 +425,8 @@ macro_rules! impl_dist_l1_integer {
 
 impl_dist_l1_integer!(i32, u32, u16, u8);
 
-/// Cosine distance (1 - cosine_similarity)
+/// Cosine distance
+/// Note: simsimd's cosine() returns similarity, so we compute 1 - similarity for distance
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DistCosine;
 
@@ -240,10 +443,11 @@ impl Distance<f32> for DistCosine {
             "Input vector contains NaN or Infinity"
         );
 
-        let similarity = f32::cosine(va, vb)
+        // simsimd's cosine() returns DISTANCE (1 - similarity), not raw similarity
+        let distance = f32::cosine(va, vb)
             .ok_or_else(|| DistanceError::InvalidValue("simsimd cosine returned None".to_string()))?;
 
-        Ok(1.0 - similarity as f32)
+        Ok(distance as f32)
     }
 }
 

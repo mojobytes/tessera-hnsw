@@ -1,0 +1,81 @@
+   Compiling proc-macro-hack v0.5.20+deprecated
+   Compiling hdf5-metno-sys v0.10.1
+   Compiling cfg-if v0.1.10
+   Compiling paste-impl v0.1.18
+   Compiling paste v0.1.18
+   Compiling hdf5-metno-types v0.10.1
+   Compiling hdf5-metno v0.10.2
+   Compiling simdeez v1.0.8
+   Compiling anndists v0.1.3
+   Compiling tessera-hnsw v0.1.0 (/Users/santifdezmunoz/Documents/repos/MojoBytes/tessera-ecosystem/tessera-hnsw)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.34s
+     Running unittests src/lib.rs (target/debug/deps/tessera_hnsw-c47ff74a37c305c4)
+
+running 27 tests
+test hnsw::tests::test_hnsw_with_vector_storage ... ok
+test hnsw::tests::test_insert_by_id_out_of_bounds ... ok
+test hnsw::tests::test_insert_by_id_no_storage ... ok
+test hnsw::tests::test_insert_by_id_dimension_mismatch ... ok
+test hnsw::tests::test_insert_by_id_success ... ok
+test hnsw::tests::test_insert_by_id_end_to_end ... ok
+test hnsw::tests::test_insert_by_id_mixed_with_regular_insert ... ok
+test hnsw::tests::test_backward_compatibility ... ok
+test hnswio::tests::test_bincode ... ok
+test storage::tests::test_in_memory_storage_contains ... ok
+test storage::tests::test_in_memory_storage_creation ... ok
+test storage::tests::test_in_memory_storage_from_slices ... ok
+test storage::tests::test_in_memory_storage_get_vector ... ok
+test storage::tests::test_in_memory_storage_empty_panics - should panic ... ok
+test storage::tests::test_in_memory_storage_mismatched_dimensions_panics - should panic ... ok
+test hnswio::tests::read_write_empty_db ... ok
+test storage::tests::test_storage_info ... ok
+test datamap::tests::test_mmap_iter ... ok
+test datamap::tests::test_file_mmap ... ok
+test hnswio::tests::reload_with_mmap ... ok
+test hnsw::tests::test_sparse_search ... ok
+test hnswio::tests::test_dump_reload_1 ... ok
+test hnswio::tests::test_dump_reload_graph_only ... ok
+test hnswio::tests::test_dump_reload_myfn ... ok
+test flatten::tests::test_dump_reload_graph_flatten ... ok
+test hnsw::tests::test_iter_layerpoint ... ok
+test hnsw::tests::test_iter_point ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.07s
+
+     Running tests/deallocation_test.rs (target/debug/deps/deallocation_test-94b8fca7f1a334dc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/filtertest.rs (target/debug/deps/filtertest-844e6c82e111c496)
+
+running 3 tests
+test filter_l2 ... ok
+test filter_villsnow ... ok
+test filter_levenstein ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.27s
+
+     Running tests/serpar.rs (target/debug/deps/serpar-3e8c8b19608fb982)
+
+running 2 tests
+test tests::test_parallel ... ok
+test tests::test_serial ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.95s
+
+   Doc-tests tessera_hnsw
+
+running 8 tests
+test src/hnsw.rs - hnsw (line 13) ... ignored
+test src/hnsw.rs - hnsw (line 62) ... ignored
+test src/hnsw.rs - hnsw::Hnsw<'b,T,D,NoStorage>::with_external_storage (line 2083) ... ignored
+test src/hnsw.rs - hnsw::Hnsw<'b,T,D,NoStorage>::with_external_storage (line 2104) ... ignored
+test src/hnsw.rs - hnsw::Hnsw<'b,T,D,VS>::insert_by_id (line 1514) ... ignored
+test src/hnsw.rs - hnsw::NoStorage (line 123) ... ignored
+test src/storage.rs - storage::InMemoryVectorStorage (line 160) ... ignored
+test src/storage.rs - storage::VectorStorage (line 46) ... ignored
+
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
