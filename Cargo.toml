@@ -1,6 +1,6 @@
 [package]
 name = "tessera-hnsw"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["MojoBytes <noreply@mojobytes.ai>"]
 description = "Fork of hnsw_rs with VectorStorage trait for Tessera vector database - HNSW implementation without embedded vectors"
 license = "MIT"
