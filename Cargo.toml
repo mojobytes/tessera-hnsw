@@ -105,6 +105,7 @@ ndarray = { version = "0.16" }
 skiplist = { version = "0.6" }
 tempfile = { version = "3" }
 itertools = {version = "0.14"}
+proptest = { version = "1.6" }  # Property-based testing
 # mojobytes-lints used via dylint, not compiled as dependency
 # mojobytes-lints = { path = "../mojobytes-lints" }
 

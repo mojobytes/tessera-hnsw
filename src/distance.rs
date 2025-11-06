@@ -542,6 +542,116 @@ mod tests {
         let dist = DistL2.eval(&a_u32, &b_u32).unwrap();
         assert!((dist - 5.196).abs() < 0.01, "Got {}", dist);
     }
+
+    // ========== Property-Based Tests ==========
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Property: Distance to self is always zero
+        #[test]
+        fn prop_distance_to_self_is_zero(v in prop::collection::vec(-100.0f32..100.0f32, 1..100)) {
+            let dist_l2 = DistL2.eval(&v, &v).unwrap();
+            assert!((dist_l2 - 0.0).abs() < 1e-6, "L2 distance to self should be 0, got {}", dist_l2);
+
+            let dist_l1 = DistL1.eval(&v, &v).unwrap();
+            assert!((dist_l1 - 0.0).abs() < 1e-6, "L1 distance to self should be 0, got {}", dist_l1);
+        }
+
+        /// Property: Distance is symmetric (d(a,b) = d(b,a))
+        #[test]
+        fn prop_distance_is_symmetric(
+            v1 in prop::collection::vec(-100.0f32..100.0f32, 1..50),
+            v2 in prop::collection::vec(-100.0f32..100.0f32, 1..50)
+        ) {
+            if v1.len() != v2.len() {
+                return Ok(());
+            }
+
+            let dist_l2_ab = DistL2.eval(&v1, &v2).unwrap();
+            let dist_l2_ba = DistL2.eval(&v2, &v1).unwrap();
+            assert!((dist_l2_ab - dist_l2_ba).abs() < 1e-6, "L2 should be symmetric");
+
+            let dist_l1_ab = DistL1.eval(&v1, &v2).unwrap();
+            let dist_l1_ba = DistL1.eval(&v2, &v1).unwrap();
+            assert!((dist_l1_ab - dist_l1_ba).abs() < 1e-6, "L1 should be symmetric");
+        }
+
+        /// Property: Triangle inequality (d(a,c) <= d(a,b) + d(b,c))
+        #[test]
+        fn prop_triangle_inequality(
+            v1 in prop::collection::vec(-100.0f32..100.0f32, 1..30),
+            v2 in prop::collection::vec(-100.0f32..100.0f32, 1..30),
+            v3 in prop::collection::vec(-100.0f32..100.0f32, 1..30)
+        ) {
+            if v1.len() != v2.len() || v2.len() != v3.len() {
+                return Ok(());
+            }
+
+            let d_ab = DistL2.eval(&v1, &v2).unwrap();
+            let d_bc = DistL2.eval(&v2, &v3).unwrap();
+            let d_ac = DistL2.eval(&v1, &v3).unwrap();
+
+            assert!(d_ac <= d_ab + d_bc + 0.001, // Small epsilon for floating point
+                "Triangle inequality violated: d({},{}) = {} > d({},{}) + d({},{}) = {} + {} = {}",
+                1, 3, d_ac, 1, 2, 2, 3, d_ab, d_bc, d_ab + d_bc);
+        }
+
+        /// Property: Non-negativity (d(a,b) >= 0) for true metrics
+        #[test]
+        fn prop_non_negativity(
+            v1 in prop::collection::vec(-100.0f32..100.0f32, 1..50),
+            v2 in prop::collection::vec(-100.0f32..100.0f32, 1..50)
+        ) {
+            if v1.len() != v2.len() {
+                return Ok(());
+            }
+
+            let dist_l2 = DistL2.eval(&v1, &v2).unwrap();
+            assert!(dist_l2 >= 0.0, "L2 distance should be non-negative, got {}", dist_l2);
+
+            let dist_l1 = DistL1.eval(&v1, &v2).unwrap();
+            assert!(dist_l1 >= 0.0, "L1 distance should be non-negative, got {}", dist_l1);
+        }
+
+        /// Property: Scaling property for L2 (d(k*a, k*b) = |k| * d(a,b))
+        #[test]
+        fn prop_l2_scaling(
+            v1 in prop::collection::vec(-10.0f32..10.0f32, 1..30),
+            v2 in prop::collection::vec(-10.0f32..10.0f32, 1..30),
+            k in -5.0f32..5.0f32
+        ) {
+            if v1.len() != v2.len() || k.abs() < 0.01 {
+                return Ok(());
+            }
+
+            let dist_original = DistL2.eval(&v1, &v2).unwrap();
+
+            let v1_scaled: Vec<f32> = v1.iter().map(|x| x * k).collect();
+            let v2_scaled: Vec<f32> = v2.iter().map(|x| x * k).collect();
+            let dist_scaled = DistL2.eval(&v1_scaled, &v2_scaled).unwrap();
+
+            let expected = k.abs() * dist_original;
+            assert!((dist_scaled - expected).abs() < 0.1,
+                "Scaling property violated: d({}*a, {}*b) = {} != {} * {} = {}",
+                k, k, dist_scaled, k.abs(), dist_original, expected);
+        }
+
+        /// Property: Hamming distance is integer
+        #[test]
+        fn prop_hamming_is_integer(
+            v1 in prop::collection::vec(0u32..100, 1..50),
+            v2 in prop::collection::vec(0u32..100, 1..50)
+        ) {
+            if v1.len() != v2.len() {
+                return Ok(());
+            }
+
+            let dist = DistHamming.eval(&v1, &v2).unwrap();
+            assert_eq!(dist, dist.floor(), "Hamming distance should be an integer, got {}", dist);
+            assert!(dist <= v1.len() as f32, "Hamming distance can't exceed vector length");
+        }
+    }
 }
 
 /// Manhattan distance (L1)
