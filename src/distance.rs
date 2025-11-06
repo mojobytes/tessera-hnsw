@@ -128,9 +128,11 @@ impl Distance<f64> for DistL2 {
     }
 }
 
-// Macro for integer implementations of DistL2
-macro_rules! impl_dist_l2_integer {
-    ($($t:ty),+) => {
+// Generic macro for implementing Distance trait on integer types
+// Reduces code duplication across distance metric implementations
+macro_rules! impl_distance_for_integers {
+    // L2 distance variant
+    (L2, $($t:ty),+) => {
         $(
             impl Distance<$t> for DistL2 {
                 fn eval(&self, va: &[$t], vb: &[$t]) -> Result<f32, DistanceError> {
@@ -149,10 +151,38 @@ macro_rules! impl_dist_l2_integer {
             }
         )+
     };
+
+    // L1 distance variant
+    (L1, $($t:ty),+) => {
+        $(
+            impl Distance<$t> for DistL1 {
+                fn eval(&self, va: &[$t], vb: &[$t]) -> Result<f32, DistanceError> {
+                    validate_inputs(va, vb)?;
+                    Ok(va.iter().zip(vb.iter())
+                        .map(|(a, b)| (*a as f32 - *b as f32).abs())
+                        .sum())
+                }
+            }
+        )+
+    };
+
+    // Hamming distance variant
+    (Hamming, $($t:ty),+) => {
+        $(
+            impl Distance<$t> for DistHamming {
+                fn eval(&self, va: &[$t], vb: &[$t]) -> Result<f32, DistanceError> {
+                    validate_inputs(va, vb)?;
+                    Ok(va.iter().zip(vb.iter()).filter(|(a, b)| a != b).count() as f32)
+                }
+            }
+        )+
+    };
 }
 
-// For integer types, convert to f32 first (matches anndists behavior)
-impl_dist_l2_integer!(i32, u32, u16, u8);
+// Apply integer implementations for all distance metrics
+impl_distance_for_integers!(L2, i32, u32, u16, u8);
+impl_distance_for_integers!(L1, i32, u32, u16, u8);
+impl_distance_for_integers!(Hamming, u16, u32, i32);
 
 #[cfg(test)]
 mod tests {
@@ -407,23 +437,7 @@ impl Distance<f32> for DistL1 {
     }
 }
 
-// Macro for integer implementations of DistL1
-macro_rules! impl_dist_l1_integer {
-    ($($t:ty),+) => {
-        $(
-            impl Distance<$t> for DistL1 {
-                fn eval(&self, va: &[$t], vb: &[$t]) -> Result<f32, DistanceError> {
-                    validate_inputs(va, vb)?;
-                    Ok(va.iter().zip(vb.iter())
-                        .map(|(a, b)| (*a as f32 - *b as f32).abs())
-                        .sum())
-                }
-            }
-        )+
-    };
-}
-
-impl_dist_l1_integer!(i32, u32, u16, u8);
+// L1 integer implementations now handled by unified macro above
 
 /// Cosine distance
 /// Note: simsimd's cosine() returns similarity, so we compute 1 - similarity for distance
@@ -490,21 +504,7 @@ impl Distance<u8> for DistHamming {
     }
 }
 
-// Macro for manual Hamming implementations (integer types without simsimd support)
-macro_rules! impl_dist_hamming_manual {
-    ($($t:ty),+) => {
-        $(
-            impl Distance<$t> for DistHamming {
-                fn eval(&self, va: &[$t], vb: &[$t]) -> Result<f32, DistanceError> {
-                    validate_inputs(va, vb)?;
-                    Ok(va.iter().zip(vb.iter()).filter(|(a, b)| a != b).count() as f32)
-                }
-            }
-        )+
-    };
-}
-
-impl_dist_hamming_manual!(u16, u32, i32);
+// Hamming integer implementations now handled by unified macro above
 
 /// Re-export unsupported distances from anndists (optional fallback)
 #[cfg(feature = "anndists-fallback")]
