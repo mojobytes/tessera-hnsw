@@ -1702,4 +1702,148 @@ mod tests {
         assert!(hnsw_loaded_res.is_err());
         Ok(())
     }
+
+    // ============================================================================
+    // Test Infrastructure for HNSW No-Data-File Feature
+    // ============================================================================
+
+    /// Helper struct to verify which files were created during dump
+    struct DumpFileChecker {
+        directory: std::path::PathBuf,
+        basename: String,
+    }
+
+    impl DumpFileChecker {
+        fn new(dir: &std::path::Path, basename: &str) -> Self {
+            Self {
+                directory: dir.to_path_buf(),
+                basename: basename.to_string(),
+            }
+        }
+
+        fn graph_file_exists(&self) -> bool {
+            let graph_path = self.directory.join(format!("{}.hnsw.graph", self.basename));
+            graph_path.exists()
+        }
+
+        fn data_file_exists(&self) -> bool {
+            let data_path = self.directory.join(format!("{}.hnsw.data", self.basename));
+            data_path.exists()
+        }
+
+        fn assert_only_graph_exists(&self) {
+            assert!(
+                self.graph_file_exists(),
+                "Graph file should exist: {}.hnsw.graph",
+                self.basename
+            );
+            assert!(
+                !self.data_file_exists(),
+                "Data file should NOT exist: {}.hnsw.data (deduplication feature)",
+                self.basename
+            );
+        }
+
+        fn assert_both_files_exist(&self) {
+            assert!(
+                self.graph_file_exists(),
+                "Graph file should exist: {}.hnsw.graph",
+                self.basename
+            );
+            assert!(
+                self.data_file_exists(),
+                "Data file should exist: {}.hnsw.data",
+                self.basename
+            );
+        }
+    }
+
+    // ============================================================================
+    // Phase 1 Tests: Verify DumpFileChecker helper works
+    // ============================================================================
+
+    #[test]
+    fn test_dump_file_checker_detects_both_files() {
+        log_init_test();
+        let directory = tempfile::tempdir().unwrap();
+        let fname = "test_checker_both";
+
+        // Create both files manually for testing
+        std::fs::File::create(directory.path().join(format!("{}.hnsw.graph", fname))).unwrap();
+        std::fs::File::create(directory.path().join(format!("{}.hnsw.data", fname))).unwrap();
+
+        let checker = DumpFileChecker::new(directory.path(), fname);
+        assert!(checker.graph_file_exists());
+        assert!(checker.data_file_exists());
+    }
+
+    #[test]
+    fn test_dump_file_checker_detects_only_graph() {
+        log_init_test();
+        let directory = tempfile::tempdir().unwrap();
+        let fname = "test_checker_graph_only";
+
+        // Create only graph file
+        std::fs::File::create(directory.path().join(format!("{}.hnsw.graph", fname))).unwrap();
+
+        let checker = DumpFileChecker::new(directory.path(), fname);
+        assert!(checker.graph_file_exists());
+        assert!(!checker.data_file_exists());
+    }
+
+    // ============================================================================
+    // RED Test: This should FAIL until we implement Phase 2
+    // ============================================================================
+
+    #[test]
+    #[ignore] // Will be enabled after Phase 2 implementation
+    fn test_dump_creates_only_graph_file() {
+        use crate::storage::InMemoryVectorStorage;
+
+        log_init_test();
+
+        // Generate test data
+        let mut rng = rand::rng();
+        let unif = Uniform::<f32>::new(0., 1.).unwrap();
+        let nbcolumn = 100;
+        let nbrow = 10;
+        let mut data = Vec::with_capacity(nbcolumn);
+        for _j in 0..nbcolumn {
+            let mut vec = Vec::with_capacity(nbrow);
+            for _ in 0..nbrow {
+                vec.push(unif.sample(&mut rng));
+            }
+            data.push(vec);
+        }
+
+        // Create storage
+        let storage = InMemoryVectorStorage::new(data.clone());
+
+        // Create HNSW with external storage
+        let ef_construct = 25;
+        let nb_connection = 10;
+        let hnsw: Hnsw<f32, DistL1, InMemoryVectorStorage<f32>> = Hnsw::new_with_storage(
+            nb_connection,
+            nbcolumn,
+            16,
+            ef_construct,
+            DistL1 {},
+            &storage,
+        );
+
+        // Insert using IDs
+        for id in 0..nbcolumn {
+            hnsw.insert_by_id(id, id).expect("insert should succeed");
+        }
+
+        let fname = "test_no_data_file";
+        let directory = tempfile::tempdir().unwrap();
+
+        // Dump HNSW with external storage
+        hnsw.file_dump(directory.path(), fname).expect("dump should succeed");
+
+        // Verify ONLY .graph file was created (not .data)
+        let checker = DumpFileChecker::new(directory.path(), fname);
+        checker.assert_only_graph_exists(); // ← This will FAIL until Phase 2
+    }
 } // end module tests

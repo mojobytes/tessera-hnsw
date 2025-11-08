@@ -1,0 +1,63 @@
+   Compiling tessera-hnsw v0.2.0 (/Volumes/WD_BLACK/repos/MojoBytes/tessera-ecosystem/tessera-hnsw)
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/WD_BLACK/repos/MojoBytes/tessera-ecosystem/tessera-hnsw/target/debug/incremental/tessera_hnsw-16u2yt6uus0xf/s-hcsjbmndqa-0907jub-working`
+
+warning: `tessera-hnsw` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.55s
+     Running unittests src/lib.rs (target/debug/deps/tessera_hnsw-d31a5ae31644b99e)
+
+running 52 tests
+test distance::tests::test_dist_cosine_parallel ... ok
+test distance::tests::test_dist_dot_basic ... ok
+test distance::tests::test_dist_cosine_opposite ... ok
+test distance::tests::test_dist_l1_basic ... ok
+test distance::tests::test_dist_hamming_different ... ok
+test distance::tests::test_dist_hamming_identical ... ok
+test distance::tests::test_dist_dot_orthogonal ... ok
+test distance::tests::test_dist_cosine_orthogonal ... ok
+test distance::tests::test_dist_l1_negative ... ok
+test distance::tests::test_dist_l2_f32_basic ... ok
+test distance::tests::test_dist_l2_f32_zero ... ok
+test distance::tests::test_dist_l2_i32 ... ok
+test distance::tests::test_empty_vectors_error ... ok
+test distance::tests::test_length_mismatch_error ... ok
+test distance::tests::test_large_dimension_vectors ... ok
+test distance::tests::test_negative_values ... ok
+test distance::tests::test_mixed_integer_types ... ok
+test distance::tests::test_single_element_vectors ... ok
+test distance::tests::test_zero_vectors ... ok
+test hnsw::tests::test_insert_by_id_no_storage ... ok
+test hnsw::tests::test_hnsw_with_vector_storage ... ok
+test hnsw::tests::test_insert_by_id_out_of_bounds ... ok
+test hnsw::tests::test_insert_by_id_dimension_mismatch ... ok
+test hnsw::tests::test_insert_by_id_mixed_with_regular_insert ... ok
+test hnsw::tests::test_backward_compatibility ... ok
+test hnsw::tests::test_insert_by_id_end_to_end ... ok
+test hnsw::tests::test_insert_by_id_success ... ok
+test hnswio::tests::test_bincode ... ok
+test hnswio::tests::read_write_empty_db ... ok
+test distance::tests::prop_hamming_is_integer ... ok
+test storage::tests::test_in_memory_storage_contains ... ok
+test storage::tests::test_in_memory_storage_creation ... ok
+test storage::tests::test_in_memory_storage_empty_panics - should panic ... ok
+test storage::tests::test_in_memory_storage_from_slices ... ok
+test storage::tests::test_in_memory_storage_get_vector ... ok
+test storage::tests::test_in_memory_storage_mismatched_dimensions_panics - should panic ... ok
+test storage::tests::test_storage_info ... ok
+test datamap::tests::test_file_mmap ... ok
+test datamap::tests::test_mmap_iter ... ok
+test distance::tests::prop_l2_scaling ... ok
+test distance::tests::prop_triangle_inequality ... ok
+test distance::tests::prop_distance_is_symmetric ... ok
+test distance::tests::prop_non_negativity ... ok
+test distance::tests::prop_distance_to_self_is_zero ... ok
+test hnswio::tests::reload_with_mmap ... ok
+test hnsw::tests::test_sparse_search ... ok
+test hnswio::tests::test_dump_reload_1 ... ok
+test hnswio::tests::test_dump_reload_graph_only ... ok
+test flatten::tests::test_dump_reload_graph_flatten ... ok
+test hnswio::tests::test_dump_reload_myfn ... ok
+test hnsw::tests::test_iter_layerpoint ... ok
+test hnsw::tests::test_iter_point ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.65s
+
