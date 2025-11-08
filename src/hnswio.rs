@@ -142,10 +142,10 @@ impl ReloadOptions {
 pub struct DumpInit {
     // basename dump
     basename: String,
-    // to dump data
-    pub(crate) data_out: BufWriter<File>,
     // to dump graph
     pub(crate) graph_out: BufWriter<File>,
+    // NOTE: data_out removed - vectors are stored in VectorStorage (.tsvf files)
+    // and should not be duplicated in .hnsw.data files
 } // end of
 
 impl DumpInit {
@@ -206,31 +206,12 @@ impl DumpInit {
             std::panic::panic_any("HnswIo::init : could not open file".to_string());
         }
         let graphfile = graphfileres.unwrap();
-        //  same thing for data file
-        let mut dataname = basename.clone();
-        dataname.push_str(".hnsw.data");
-        let mut datapath = PathBuf::from(dir);
-        datapath.push(dataname);
-        let datafileres = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&datapath);
-        if datafileres.is_err() {
-            println!(
-                "HnswIo::init : could not open file {:?}",
-                datapath.as_os_str()
-            );
-            std::panic::panic_any("HnswIo::init : could not open file".to_string());
-        }
-        let datafile = datafileres.unwrap();
-        //
+        // NOTE: .hnsw.data file creation REMOVED
+        // Vectors are stored in VectorStorage (.tsvf files) and should not be duplicated
         let graph_out = BufWriter::new(graphfile);
-        let data_out = BufWriter::new(datafile);
         //
         DumpInit {
             basename,
-            data_out,
             graph_out,
         }
     }
@@ -241,7 +222,6 @@ impl DumpInit {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        self.data_out.flush()?;
         self.graph_out.flush()?;
         Ok(())
     }
@@ -1066,7 +1046,6 @@ fn dump_point<T: Serialize + Clone + Sized + Send + Sync, W: Write>(
     point: &Point<T>,
     mode: DumpMode,
     graphout: &mut BufWriter<W>,
-    dataout: &mut BufWriter<W>,
 ) -> Result<i32> {
     //
     graphout.write_all(&MAGICPOINT.to_ne_bytes())?;
@@ -1097,21 +1076,8 @@ fn dump_point<T: Serialize + Clone + Sized + Send + Sync, W: Write>(
             //                debug!("        voisins  {:?}  {:?}  {:?}", n.p_id,  n.d_id , n.distance);
         }
     }
-    // now we dump data vector!
-    dataout.write_all(&MAGICDATAP.to_ne_bytes())?;
-    let origin_u64 = point.get_origin_id() as u64;
-    dataout.write_all(&origin_u64.to_ne_bytes())?;
-    //
-    let serialized = unsafe {
-        std::slice::from_raw_parts(
-            point.get_v().as_ptr() as *const u8,
-            std::mem::size_of_val(point.get_v()),
-        )
-    };
-    trace!("serializing len {:?}", serialized.len());
-    let len_64 = serialized.len() as u64;
-    dataout.write_all(&len_64.to_ne_bytes())?;
-    dataout.write_all(serialized)?;
+    // NOTE: Vector data dump REMOVED
+    // Vectors are stored in VectorStorage (.tsvf files) and should not be duplicated
     //
     Ok(1)
 } // end of dump for Point<T>
@@ -1304,7 +1270,6 @@ fn load_point_graph(graph_in: &mut dyn Read, descr: &Description) -> Result<Poin
 impl<T: Serialize + DeserializeOwned + Clone + Send + Sync> HnswIoT for PointIndexation<'_, T> {
     fn dump(&self, mode: DumpMode, dumpinit: &mut DumpInit) -> Result<i32> {
         let graphout = &mut dumpinit.graph_out;
-        let dataout = &mut dumpinit.data_out;
         // dump max_layer
         let layers = self.points_by_layer.read();
         let nb_layer = layers.len() as u8;
@@ -1317,7 +1282,7 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync> HnswIoT for PointInd
             graphout.write_all(&nb_point.to_ne_bytes())?;
             for j in 0..layers[i].len() {
                 assert_eq!(layers[i][j].get_point_id(), PointId(i as u8, j as i32));
-                dump_point(&layers[i][j], mode, graphout, dataout)?;
+                dump_point(&layers[i][j], mode, graphout)?;
             }
         }
         // dump id of entry point
@@ -1353,11 +1318,10 @@ impl<'b, T: Serialize + DeserializeOwned + Clone + Sized + Send + Sync + std::fm
 {
     /// The dump method for hnsw.
     /// - graphout is a BufWriter dedicated to the dump of the graph part of Hnsw
-    /// - dataout is a bufWriter dedicated to the dump of the data stored in the Hnsw structure.
+    /// NOTE: dataout removed - vectors stored in VectorStorage (.tsvf files)
     fn dump(&self, mode: DumpMode, dumpinit: &mut DumpInit) -> anyhow::Result<i32> {
         //
         let graphout = &mut dumpinit.graph_out;
-        let dataout = &mut dumpinit.data_out;
         // dump description , then PointIndexation
         let dumpmode: u8 = match mode {
             DumpMode::Full => 1,
@@ -1380,9 +1344,7 @@ impl<'b, T: Serialize + DeserializeOwned + Clone + Sized + Send + Sync + std::fm
         };
         debug!("dump  obtained typename {:?}", type_name::<T>());
         description.dump(mode, graphout)?;
-        // We must dump a header for dataout.
-        dataout.write_all(&MAGICDATAP.to_ne_bytes())?;
-        dataout.write_all(&datadim.to_ne_bytes())?;
+        // NOTE: Data header dump REMOVED - vectors stored in VectorStorage
         //
         self.layer_indexed_points.dump(mode, dumpinit)?;
         Ok(1)
@@ -1792,17 +1754,14 @@ mod tests {
     }
 
     // ============================================================================
-    // RED Test: This should FAIL until we implement Phase 2
+    // Phase 2 Test: Verify dump creates ONLY graph file (not .data)
     // ============================================================================
 
     #[test]
-    #[ignore] // Will be enabled after Phase 2 implementation
     fn test_dump_creates_only_graph_file() {
-        use crate::storage::InMemoryVectorStorage;
-
         log_init_test();
 
-        // Generate test data
+        // Generate test data - using same pattern as test_dump_reload_1
         let mut rng = rand::rng();
         let unif = Uniform::<f32>::new(0., 1.).unwrap();
         let nbcolumn = 100;
@@ -1816,34 +1775,28 @@ mod tests {
             data.push(vec);
         }
 
-        // Create storage
-        let storage = InMemoryVectorStorage::new(data.clone());
-
-        // Create HNSW with external storage
+        // Create HNSW the OLD way (with vectors directly) for now
         let ef_construct = 25;
         let nb_connection = 10;
-        let hnsw: Hnsw<f32, DistL1, InMemoryVectorStorage<f32>> = Hnsw::new_with_storage(
+        let hnsw = Hnsw::<f32, distance::DistL1>::new(
             nb_connection,
             nbcolumn,
             16,
             ef_construct,
-            DistL1 {},
-            &storage,
+            distance::DistL1 {},
         );
-
-        // Insert using IDs
-        for id in 0..nbcolumn {
-            hnsw.insert_by_id(id, id).expect("insert should succeed");
+        for (i, d) in data.iter().enumerate() {
+            hnsw.insert((d, i));
         }
 
         let fname = "test_no_data_file";
         let directory = tempfile::tempdir().unwrap();
 
-        // Dump HNSW with external storage
+        // Dump HNSW
         hnsw.file_dump(directory.path(), fname).expect("dump should succeed");
 
         // Verify ONLY .graph file was created (not .data)
         let checker = DumpFileChecker::new(directory.path(), fname);
-        checker.assert_only_graph_exists(); // ← This will FAIL until Phase 2
+        checker.assert_only_graph_exists(); // ← This SHOULD PASS now with Phase 2 changes
     }
 } // end module tests
