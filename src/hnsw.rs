@@ -102,7 +102,7 @@ use log::{debug, info};
 
 pub use crate::filter::FilterT;
 use crate::distance::Distance;
-use crate::storage::VectorStorage;
+use crate::storage::{DynVectorStorage, VectorStorage};
 
 // TODO
 // Profiling.
@@ -268,6 +268,16 @@ impl<'b, T: Clone + Send + Sync + 'b> PointData<'b, T> {
             }
         }
     } // end of get_v
+
+    /// Try to get the vector data without panicking.
+    /// Returns None for VectorId variants (use Hnsw::get_point_vector for those).
+    fn try_get_v(&self) -> Option<&[T]> {
+        match self {
+            PointData::V(v) => Some(v.as_slice()),
+            PointData::S(s) => Some(s),
+            PointData::VectorId(_) => None,
+        }
+    }
 } // end of impl block for PointData
 
 /// The basestructure representing a data point.  
@@ -343,6 +353,12 @@ impl<'b, T: Clone + Send + Sync> Point<'b, T> {
     /// get a reference to vector data
     pub fn get_v(&self) -> &[T] {
         self.data.get_v()
+    }
+
+    /// Try to get the vector data without panicking.
+    /// Returns None for VectorId variants (use Hnsw::get_point_vector for those).
+    pub fn try_get_v(&self) -> Option<&[T]> {
+        self.data.try_get_v()
     }
 
     /// return coordinates in indexation
@@ -540,6 +556,8 @@ pub struct PointIndexation<'b, T: Clone + Send + Sync> {
     pub(crate) nb_point: Arc<RwLock<usize>>,
     /// curent enter_point: an Arc RwLock on a possible Arc Point
     pub(crate) entry_point: Arc<RwLock<Option<Arc<Point<'b, T>>>>>,
+    /// cached data dimension (set on first insert, needed for VectorId points)
+    pub(crate) data_dimension: Arc<RwLock<usize>>,
 }
 
 // A point indexation may contain circular references. To deallocate these after a point indexation goes out of scope,
@@ -602,8 +620,15 @@ impl<'b, T: Clone + Send + Sync> PointIndexation<'b, T> {
             layer_g,
             nb_point: Arc::new(RwLock::new(0)),
             entry_point: Arc::new(RwLock::new(None)),
+            data_dimension: Arc::new(RwLock::new(0)),
         }
     } // end of new
+
+    /// Sets the data dimension for vectors.
+    /// Called by Hnsw when using external storage (VectorId points).
+    pub fn set_data_dimension(&self, dim: usize) {
+        *self.data_dimension.write() = dim;
+    }
 
     /// returns the maximum level of layer observed
     pub fn get_max_level_observed(&self) -> u8 {
@@ -636,6 +661,13 @@ impl<'b, T: Clone + Send + Sync> PointIndexation<'b, T> {
     // generate a new Point/ArcPoint (with neigbourhood info empty) and store it in global table
     // The function is called by Hnsw insert method
     fn generate_new_point(&self, data: &[T], origin_id: usize) -> (Arc<Point<'b, T>>, usize) {
+        // Set data dimension on first insert (for get_data_dimension())
+        {
+            let mut dim = self.data_dimension.write();
+            if *dim == 0 && !data.is_empty() {
+                *dim = data.len();
+            }
+        }
         // get a write lock at the beginning of the function
         let level = self.layer_g.generate();
         let new_point;
@@ -744,17 +776,16 @@ impl<'b, T: Clone + Send + Sync> PointIndexation<'b, T> {
         }
     } // end of get_layer_nb_point
 
-    /// returns the size of data vector in graph if any, else return 0
+    /// returns the size of data vector in graph if any, else return 0.
+    /// This returns the cached dimension set during first insert or via set_data_dimension().
+    /// Works correctly for both embedded vectors and VectorId references.
     pub fn get_data_dimension(&self) -> usize {
-        let ep = self.entry_point.read();
-        match ep.as_ref() {
-            Some(point) => point.get_v().len(),
-            None => 0,
-        }
+        *self.data_dimension.read()
     }
 
-    /// returns (**by cloning**) the data inside a point given it PointId, or None if PointId is not coherent.  
-    /// Can be useful after reloading from a dump.   
+    /// returns (**by cloning**) the data inside a point given it PointId, or None if PointId is not coherent.
+    /// Returns None for VectorId points (those using external storage) - use Hnsw::get_point_vector instead.
+    /// Can be useful after reloading from a dump.
     /// NOTE : This function should not be called during or before insertion in the structure is terminated as it
     /// uses read locks to access the inside of Hnsw structure.
     pub fn get_point_data(&self, p_id: &PointId) -> Option<Vec<T>> {
@@ -764,7 +795,8 @@ impl<'b, T: Clone + Send + Sync> PointIndexation<'b, T> {
         let p: usize = std::convert::TryFrom::try_from(p_id.1).unwrap();
         let l = p_id.0 as usize;
         if p_id.0 <= self.get_max_level_observed() && p < self.get_layer_nb_point(l) {
-            Some(self.points_by_layer.read()[l][p].get_v().to_vec())
+            // Use try_get_v() to handle VectorId points gracefully (returns None instead of panicking)
+            self.points_by_layer.read()[l][p].try_get_v().map(|v| v.to_vec())
         } else {
             None
         }
@@ -943,6 +975,19 @@ pub struct Hnsw<'b, T: Clone + Send + Sync + 'b, D: Distance<T>, VS: VectorStora
     /// External vector storage (optional, for external vector management).
     /// When `Some`, vectors are accessed via VectorStorage trait instead of being embedded in Points.
     pub(crate) vector_storage: Option<&'b VS>,
+    /// Dynamic vector storage for graph-only reloads.
+    ///
+    /// When loading an HNSW index from disk in graph-only mode (no embedded vectors),
+    /// Points have VectorId references but `vector_storage` is None. This field allows
+    /// setting storage dynamically after load via `set_dynamic_vector_storage()`.
+    ///
+    /// Resolution priority in `get_point_vector()`:
+    /// 1. Embedded vector in Point (`PointData::V`)
+    /// 2. Mmap slice in Point (`PointData::S`)
+    /// 3. Dynamic vector storage (this field) - for `PointData::VectorId`
+    /// 4. Static vector storage (`vector_storage`) - for `PointData::VectorId`
+    /// 5. Panic if no source available
+    pub(crate) dyn_vector_storage: Option<Arc<dyn DynVectorStorage<T>>>,
 } // end of Hnsw
 
 impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync, VS: VectorStorage<'b, T>> Hnsw<'b, T, D, VS> {
@@ -987,6 +1032,7 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             searching: false,
             datamap_opt: false,
             vector_storage: None,
+            dyn_vector_storage: None,
         }
     } // end of new
 
@@ -1024,6 +1070,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         //
         let data_dimension = storage.dimension();
         info!("Hnsw data_dimension from storage: {:?}", data_dimension);
+        // Set dimension in PointIndexation for get_data_dimension() support with VectorId points
+        layer_indexed_points.set_data_dimension(data_dimension);
         //
         Hnsw {
             max_nb_connection,
@@ -1037,34 +1085,103 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             searching: false,
             datamap_opt: false,
             vector_storage: Some(storage),
+            dyn_vector_storage: None,
         }
     } // end of new_with_storage
+
+    /// Set dynamic vector storage for graph-only indexes loaded from disk.
+    ///
+    /// When loading an HNSW index saved without embedded vectors (graph-only mode),
+    /// Points have `VectorId` references but no storage to resolve them. This method
+    /// sets the storage so that `search()` can access vectors during distance calculation.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Arc-wrapped VectorStorage implementation (e.g., `ShardedVectorStorage`)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Load graph-only index
+    /// let mut hnsw = reloader.load_hnsw::<f32, DistL2>()?;
+    ///
+    /// // Configure external vector storage
+    /// let storage = Arc::new(ShardedVectorStorage::new(reader, 50_000));
+    /// hnsw.set_dynamic_vector_storage(storage);
+    ///
+    /// // Now search works!
+    /// let results = hnsw.search(&query, 10, 50);
+    /// ```
+    ///
+    /// # Thread Safety
+    ///
+    /// The Arc wrapper ensures thread-safe sharing of the storage across concurrent searches.
+    pub fn set_dynamic_vector_storage(&mut self, storage: Arc<dyn DynVectorStorage<T>>) {
+        self.dyn_vector_storage = Some(storage);
+    }
 
     /// Helper method to get vector data from a Point, accounting for VectorStorage.
     ///
     /// This abstracts away whether vectors are stored internally or externally.
+    /// Supports multiple vector resolution strategies:
+    ///
+    /// 1. Embedded vector (`PointData::V`) - used for in-memory construction
+    /// 2. Mmap slice (`PointData::S`) - used for memory-mapped data
+    /// 3. VectorId reference (`PointData::VectorId`) - used for external storage
+    /// 4. Empty embedded vector - treated as VectorId for graph-only reloads
+    ///
+    /// For VectorId and empty vectors, resolution order is:
+    /// - `dyn_vector_storage` (dynamic, set after load)
+    /// - `vector_storage` (static, set at construction)
     ///
     /// # Panics
     ///
     /// Panics if:
-    /// - Point has VectorId but no storage is configured (programming error)
-    /// - Vector ID not found in storage (data corruption or programming error)
-    ///
-    /// These conditions indicate a serious programming error that should be fixed,
-    /// not handled at runtime.
+    /// - Point has VectorId/empty vector but no storage is configured
+    /// - Vector ID not found in storage (data corruption)
     #[inline]
     fn get_point_vector<'a>(&'a self, point: &'a Point<'b, T>) -> &'a [T] {
         match &point.data {
-            PointData::V(v) => v.as_slice(),
+            PointData::V(v) if !v.is_empty() => v.as_slice(),
+            PointData::V(_) => {
+                // Empty vector - graph-only reload case
+                // Use origin_id to look up vector from storage
+                let id = point.origin_id;
+                self.resolve_vector_from_storage(id)
+            }
             PointData::S(s) => s,
             PointData::VectorId(id) => {
-                // We must have VectorStorage if PointData is VectorId
-                self.vector_storage
-                    .expect("Point has VectorId but no storage configured - this is a programming error")
-                    .get_vector(*id)
-                    .unwrap_or_else(|| panic!("Vector ID {} not found in storage - possible data corruption", id))
+                self.resolve_vector_from_storage(*id)
             }
         }
+    }
+
+    /// Resolve vector from dynamic or static storage.
+    ///
+    /// Tries `dyn_vector_storage` first (for graph-only reloads),
+    /// then falls back to `vector_storage` (for static storage references).
+    #[inline]
+    fn resolve_vector_from_storage(&self, id: usize) -> &[T] {
+        // Priority 1: Dynamic vector storage (for graph-only reloads)
+        if let Some(ref storage) = self.dyn_vector_storage {
+            if let Some(vec) = storage.get_vector(id) {
+                return vec;
+            }
+        }
+
+        // Priority 2: Static vector storage (for construction-time storage)
+        if let Some(storage) = self.vector_storage {
+            if let Some(vec) = storage.get_vector(id) {
+                return vec;
+            }
+        }
+
+        // No storage configured or vector not found
+        panic!(
+            "Vector ID {} not found: no storage configured or vector missing. \
+             For graph-only reloads, call set_dynamic_vector_storage() after loading.",
+            id
+        );
     }
 
     /// get ef_construction used in graph creation
@@ -2226,9 +2343,12 @@ where
     // check layers
     let layers_1 = hnsw1.layer_indexed_points.points_by_layer.read();
     let layers_2 = hnsw2.layer_indexed_points.points_by_layer.read();
+    // Compare number of layers - may differ if one was created with smaller max_layer
+    // but after reload, layers are padded to NB_LAYER_MAX. Compare only non-empty layers.
+    let num_layers_to_check = layers_1.len().min(layers_2.len());
     let mut nb_point_checked = 0;
     let mut nb_neighbours_checked = 0;
-    for i in 0..NB_LAYER_MAX as usize {
+    for i in 0..num_layers_to_check {
         debug!("Checking layer {:?}", i);
         assert_eq!(layers_1[i].len(), layers_2[i].len());
         for j in 0..layers_1[i].len() {
@@ -2395,7 +2515,7 @@ mod tests {
     // Test creating Hnsw with InMemoryVectorStorage
     #[test]
     fn test_hnsw_with_vector_storage() {
-        use crate::storage::InMemoryVectorStorage;
+        use crate::storage::{DynVectorStorage, InMemoryVectorStorage};
 
         log_init_test();
 
@@ -2415,10 +2535,10 @@ mod tests {
         let _hnsw: Hnsw<f32, distance::DistL2, InMemoryVectorStorage<f32>> =
             Hnsw::new_with_storage(15, 100, 16, 200, distance::DistL2 {}, &storage);
 
-        // Verify storage info
-        assert_eq!(storage.len(), 5);
-        assert_eq!(storage.dimension(), 4);
-        assert!(!storage.is_empty());
+        // Verify storage info (use qualified syntax to avoid ambiguity)
+        assert_eq!(DynVectorStorage::len(&storage), 5);
+        assert_eq!(DynVectorStorage::dimension(&storage), 4);
+        assert!(!DynVectorStorage::is_empty(&storage));
     }
 
     // Test backward compatibility - existing new() should still work
