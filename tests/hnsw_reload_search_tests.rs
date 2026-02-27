@@ -40,16 +40,17 @@ fn generate_random_vectors(count: usize, dimension: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
-/// Test 1.1: Confirms the current bug
+/// Test 1.1: Verifies graceful degradation after graph-only reload without storage
 ///
-/// After loading a graph-only HNSW index from disk, search FAILS because
-/// Points have empty vectors and distance calculation panics.
+/// After loading a graph-only HNSW index from disk WITHOUT configuring external
+/// storage, search should gracefully degrade (return empty results) instead of
+/// panicking.
 ///
-/// This test documents the current broken behavior and should PASS
-/// (meaning the bug exists and search fails as expected).
+/// Previously this test verified a bug where search would PANIC. Now that the
+/// bug is fixed, this test verifies the graceful degradation behavior.
 #[test]
-fn test_search_after_graph_only_reload_fails() {
-    println!("\n\n test_search_after_graph_only_reload_fails");
+fn test_search_after_graph_only_reload_graceful_degradation() {
+    println!("\n\n test_search_after_graph_only_reload_graceful_degradation");
     log_init_test();
 
     // 1. Generate test data: 100 vectors of dimension 10
@@ -83,24 +84,30 @@ fn test_search_after_graph_only_reload_fails() {
     let fname = "test_graph_only_reload";
     let _res = hnsw.file_dump(directory.path(), fname);
 
-    // 4. Reload from disk
+    // 4. Reload from disk WITHOUT configuring external storage
     let mut reloader = HnswIo::new(directory.path(), fname);
     let hnsw_loaded: Hnsw<f32, DistL2> = reloader.load_hnsw::<f32, DistL2>().unwrap();
 
-    // 5. Attempt search - THIS SHOULD PANIC with "EmptyVectors"
-    // We use std::panic::catch_unwind to capture the panic
+    // 5. Search should NOT panic - graceful degradation
+    // Without external storage, vectors are missing, but search degrades gracefully
     let search_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         hnsw_loaded.search(query, 5, 50)
     }));
 
-    // The test PASSES if search panics (confirming the bug exists)
+    // After fix: No panic, search completes (possibly with empty results)
     assert!(
-        search_result.is_err(),
-        "BUG NOT REPRODUCED: Search should have panicked with EmptyVectors after graph-only reload. \
-         If this assertion fails, either the bug was fixed or the test setup is wrong."
+        search_result.is_ok(),
+        "FIXED: Search should NOT panic after graph-only reload. Got panic instead."
     );
 
-    println!("Bug confirmed: Search panics after graph-only reload as expected");
+    let results = search_result.unwrap();
+    println!(
+        "Search completed without panic. Results: {} (expected: empty or degraded due to missing storage)",
+        results.len()
+    );
+
+    // Note: Results may be empty because no external storage was configured
+    // This is the expected graceful degradation behavior
 }
 
 /// Test 1.2: Defines the expected behavior after fix

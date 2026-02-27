@@ -1139,17 +1139,22 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
     /// Panics if:
     /// - Point has VectorId/empty vector but no storage is configured
     /// - Vector ID not found in storage (data corruption)
+    ///
+    /// # Returns
+    ///
+    /// - `Some(&[T])` if vector data is available
+    /// - `None` if vector not found in storage (allows graceful degradation)
     #[inline]
-    fn get_point_vector<'a>(&'a self, point: &'a Point<'b, T>) -> &'a [T] {
+    fn get_point_vector<'a>(&'a self, point: &'a Point<'b, T>) -> Option<&'a [T]> {
         match &point.data {
-            PointData::V(v) if !v.is_empty() => v.as_slice(),
+            PointData::V(v) if !v.is_empty() => Some(v.as_slice()),
             PointData::V(_) => {
                 // Empty vector - graph-only reload case
                 // Use origin_id to look up vector from storage
                 let id = point.origin_id;
                 self.resolve_vector_from_storage(id)
             }
-            PointData::S(s) => s,
+            PointData::S(s) => Some(s),
             PointData::VectorId(id) => {
                 self.resolve_vector_from_storage(*id)
             }
@@ -1160,28 +1165,41 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
     ///
     /// Tries `dyn_vector_storage` first (for graph-only reloads),
     /// then falls back to `vector_storage` (for static storage references).
+    ///
+    /// # Returns
+    ///
+    /// - `Some(&[T])` if vector found in storage
+    /// - `None` if no storage configured or vector not found (graceful degradation)
+    ///
+    /// # Note
+    ///
+    /// Previously this function would panic on missing vectors. Now it returns
+    /// `None` to allow callers to handle missing vectors gracefully without
+    /// poisoning locks or crashing the process.
     #[inline]
-    fn resolve_vector_from_storage(&self, id: usize) -> &[T] {
+    fn resolve_vector_from_storage(&self, id: usize) -> Option<&[T]> {
         // Priority 1: Dynamic vector storage (for graph-only reloads)
         if let Some(ref storage) = self.dyn_vector_storage {
             if let Some(vec) = storage.get_vector(id) {
-                return vec;
+                return Some(vec);
             }
         }
 
         // Priority 2: Static vector storage (for construction-time storage)
         if let Some(storage) = self.vector_storage {
             if let Some(vec) = storage.get_vector(id) {
-                return vec;
+                return Some(vec);
             }
         }
 
-        // No storage configured or vector not found
-        panic!(
+        // No storage configured or vector not found - return None for graceful degradation
+        // Previously: panic!() - which poisoned RwLock and broke all subsequent operations
+        log::warn!(
             "Vector ID {} not found: no storage configured or vector missing. \
              For graph-only reloads, call set_dynamic_vector_storage() after loading.",
             id
         );
+        None
     }
 
     /// get ef_construction used in graph creation
@@ -1323,7 +1341,14 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             return return_points;
         }
         // initialize visited points
-        let entry_vec = self.get_point_vector(&entry_point);
+        let entry_vec = match self.get_point_vector(&entry_point) {
+            Some(v) => v,
+            None => {
+                // Entry point vector missing - cannot proceed with search in this layer
+                log::warn!("Entry point vector {} missing from storage, returning empty results", entry_point.origin_id);
+                return return_points;
+            }
+        };
         let dist_to_entry_point = self.dist_f.eval(point, entry_vec)
             .expect("Distance to entry point should never fail for indexed vectors");
         trace!("       distance to entry point: {:?} ", dist_to_entry_point);
@@ -1337,46 +1362,58 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             &entry_point,
             -dist_to_entry_point,
         )));
-        return_points.push(Arc::new(PointWithOrder::new(
-            &entry_point,
-            dist_to_entry_point,
-        )));
+        // PERF-FIX: Filter entry point BEFORE adding to return_points
+        // This ensures all results in return_points pass the filter, eliminating
+        // the need for redundant post-processing in search_filter().
+        // Previously, entry point was added unconditionally, requiring double filtering.
+        let entry_passes_filter = filter
+            .as_ref()
+            .is_none_or(|f| f.hnsw_filter(&entry_point.origin_id));
+        if entry_passes_filter {
+            return_points.push(Arc::new(PointWithOrder::new(
+                &entry_point,
+                dist_to_entry_point,
+            )));
+        }
         // at the beginning candidate_points contains point passed as arg in layer entry_point_id.0
         while !candidate_points.is_empty() {
             // get nearest point in candidate_points
             let c = candidate_points.pop().unwrap();
             // f farthest point to
-            let f = return_points.peek().unwrap();
-            // Note: These assertions removed because some distance metrics (e.g., DistDot) can return negative values
-            // assert!(f.dist_to_ref >= 0.);
-            // assert!(c.dist_to_ref <= 0.);
-            trace!(
-                "Comparaing c : {:?} f : {:?}",
-                -(c.dist_to_ref),
-                f.dist_to_ref
-            );
-            if -(c.dist_to_ref) > f.dist_to_ref {
-                // this comparison requires that we are sure that distances compared are distances to the same point :
-                // This is the case we compare distance to point passed as arg.
+            // PERF-FIX: Handle case where return_points is empty (entry point filtered out)
+            // When using filters, the entry point may not pass the filter, leaving return_points empty.
+            // In this case, we must continue traversing to find filtered results.
+            let f_opt = return_points.peek();
+            if let Some(f) = f_opt {
+                // Note: These assertions removed because some distance metrics (e.g., DistDot) can return negative values
+                // assert!(f.dist_to_ref >= 0.);
+                // assert!(c.dist_to_ref <= 0.);
                 trace!(
-                    "Fast return from search_layer, nb points : {:?} \n \t c {:?} \n \t f {:?} dists: {:?}  {:?}",
-                    return_points.len(),
-                    c.point_ref.p_id,
-                    f.point_ref.p_id,
+                    "Comparaing c : {:?} f : {:?}",
                     -(c.dist_to_ref),
                     f.dist_to_ref
                 );
-                if filter.is_none() {
-                    return return_points;
-                } else if return_points.len() >= ef {
-                    return_points.retain(|p| {
-                        filter
-                            .as_ref()
-                            .unwrap()
-                            .hnsw_filter(&p.point_ref.get_origin_id())
-                    });
+                if -(c.dist_to_ref) > f.dist_to_ref {
+                    // this comparison requires that we are sure that distances compared are distances to the same point :
+                    // This is the case we compare distance to point passed as arg.
+                    trace!(
+                        "Fast return from search_layer, nb points : {:?} \n \t c {:?} \n \t f {:?} dists: {:?}  {:?}",
+                        return_points.len(),
+                        c.point_ref.p_id,
+                        f.point_ref.p_id,
+                        -(c.dist_to_ref),
+                        f.dist_to_ref
+                    );
+                    // Early return: Only when no filter (all results valid) OR we have enough filtered results
+                    // PERF-FIX: All items in return_points already pass the filter due to entry point filtering,
+                    // so we don't need the retain() call that was here before.
+                    if filter.is_none() || return_points.len() >= ef {
+                        return return_points;
+                    }
+                    // With filter but not enough results yet: continue searching
                 }
             }
+            // else: return_points is empty, continue searching for any filtered results
             // now we scan neighborhood of c in layer and increment visited_point, candidate_points
             // and optimize candidate_points so that it contains points with lowest distances to point arg
             //
@@ -1393,44 +1430,47 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 if !visited_point_id.contains_key(&e.point_ref.p_id) {
                     visited_point_id.insert(e.point_ref.p_id, Arc::clone(&e.point_ref));
                     trace!("             visited insertion {:?}", e.point_ref.p_id);
-                    let f_opt = return_points.peek();
-                    if f_opt.is_none() {
-                        // do some debug info, dumped distance is from e to c! as e is in c neighbours
-                        debug!("return points empty when inserting {:?}", e.point_ref.p_id);
-                        return return_points;
-                    }
-                    let f = f_opt.unwrap();
-                    let e_vec = self.get_point_vector(&e.point_ref);
+
+                    // Skip neighbors with missing vectors (graceful degradation)
+                    let e_vec = match self.get_point_vector(&e.point_ref) {
+                        Some(v) => v,
+                        None => {
+                            log::trace!("Skipping neighbor {} with missing vector", e.point_ref.origin_id);
+                            continue;
+                        }
+                    };
                     let e_dist_to_p = self.dist_f.eval(point, e_vec)
                         .expect("Distance between indexed vectors should be valid");
-                    let f_dist_to_p = f.dist_to_ref;
-                    if e_dist_to_p < f_dist_to_p || return_points.len() < ef {
+
+                    // PERF-FIX: Separate exploration (candidate_points) from results (return_points)
+                    // For filtered search, we need to explore MORE of the graph to find filtered results.
+                    // Key insight: return_points only contains FILTERED results, which may be sparse.
+                    // Without filter, use distance-based pruning. With filter, explore more aggressively.
+                    let need_more_filtered = filter.is_some() && return_points.len() < ef;
+                    let closer_than_worst = return_points.peek().is_none_or(|f| e_dist_to_p < f.dist_to_ref);
+                    let should_explore = need_more_filtered || closer_than_worst || return_points.len() < ef;
+
+                    // Always add to candidate_points for exploration when promising
+                    if should_explore {
+                        candidate_points
+                            .push(Arc::new(PointWithOrder::new(&e.point_ref, -e_dist_to_p)));
+                    }
+
+                    // Add to return_points only if passes filter (or no filter) AND closer than worst
+                    let passes_filter = filter.as_ref().is_none_or(|f| f.hnsw_filter(&e.point_ref.origin_id));
+                    let should_add_to_results = passes_filter && (closer_than_worst || return_points.len() < ef);
+
+                    if should_add_to_results {
                         let e_prime = Arc::new(PointWithOrder::new(&e.point_ref, e_dist_to_p));
-                        // a neighbour of neighbour is better, we insert it into candidate with the distance to point
                         trace!(
                             "                inserting new candidate {:?}",
                             e_prime.point_ref.p_id
                         );
-                        candidate_points
-                            .push(Arc::new(PointWithOrder::new(&e.point_ref, -e_dist_to_p)));
-                        if filter.is_none() {
-                            return_points.push(Arc::clone(&e_prime));
-                        } else {
-                            let id: &usize = &e_prime.point_ref.get_origin_id();
-                            if filter.as_ref().unwrap().hnsw_filter(id) {
-                                if return_points.len() == 1 {
-                                    let only_id = return_points.peek().unwrap().point_ref.origin_id;
-                                    if !filter.as_ref().unwrap().hnsw_filter(&only_id) {
-                                        return_points.clear()
-                                    }
-                                }
-                                return_points.push(Arc::clone(&e_prime))
-                            }
-                        }
+                        return_points.push(e_prime);
                         if return_points.len() > ef {
                             return_points.pop();
                         }
-                    } // end if e.dist_to_ref < f.dist_to_ref
+                    }
                 }
             } // end of for on neighbours_c
         } // end of while in candidates
@@ -1486,7 +1526,15 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             self.layer_indexed_points.check_entry_point(&new_point);
             return;
         }
-        let entry_vec = self.get_point_vector(enter_point_copy.as_ref().unwrap());
+        let entry_vec = match self.get_point_vector(enter_point_copy.as_ref().unwrap()) {
+            Some(v) => v,
+            None => {
+                // Entry point vector missing - cannot proceed with insertion
+                log::warn!("Entry point vector missing during insert, adding point without full HNSW integration");
+                self.layer_indexed_points.check_entry_point(&new_point);
+                return;
+            }
+        };
         let mut dist_to_entry = self.dist_f.eval(data, entry_vec)
             .expect("Distance calculation failed: vectors in HNSW index should be valid");
         // we go from self.max_level_observed to level+1 included
@@ -1521,13 +1569,14 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 {
                     new_point.neighbours.write()[l as usize].push(Arc::clone(&ep));
                 }
-                // get the lowest distance point
-                let ep_vec = self.get_point_vector(&ep.point_ref);
-                let tmp_dist = self.dist_f.eval(data, ep_vec)
-                    .expect("HNSW search distance calculation failed for indexed vector");
-                if tmp_dist < dist_to_entry {
-                    enter_point_copy = Some(Arc::clone(&ep.point_ref));
-                    dist_to_entry = tmp_dist;
+                // get the lowest distance point (skip if vector missing)
+                if let Some(ep_vec) = self.get_point_vector(&ep.point_ref) {
+                    let tmp_dist = self.dist_f.eval(data, ep_vec)
+                        .expect("HNSW search distance calculation failed for indexed vector");
+                    if tmp_dist < dist_to_entry {
+                        enter_point_copy = Some(Arc::clone(&ep.point_ref));
+                        dist_to_entry = tmp_dist;
+                    }
                 }
             } else {
                 // this layer is not yet filled
@@ -1703,7 +1752,15 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             return Ok(());
         }
 
-        let entry_vec = self.get_point_vector(enter_point_copy.as_ref().unwrap());
+        let entry_vec = match self.get_point_vector(enter_point_copy.as_ref().unwrap()) {
+            Some(v) => v,
+            None => {
+                // Entry point vector missing - cannot proceed with parallel insertion
+                log::warn!("Entry point vector missing during parallel insert, adding point without full HNSW integration");
+                self.layer_indexed_points.check_entry_point(&new_point);
+                return Ok(());
+            }
+        };
         let mut dist_to_entry = self.dist_f.eval(vector, entry_vec)
             .expect("Distance calculation failed: vectors in HNSW index should be valid");
 
@@ -1724,13 +1781,14 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 {
                     new_point.neighbours.write()[l as usize].push(Arc::clone(&ep));
                 }
-                // Update entry point if closer
-                let ep_vec = self.get_point_vector(&ep.point_ref);
-                let tmp_dist = self.dist_f.eval(vector, ep_vec)
-                    .expect("HNSW search distance calculation failed for indexed vector");
-                if tmp_dist < dist_to_entry {
-                    enter_point_copy = Some(Arc::clone(&ep.point_ref));
-                    dist_to_entry = tmp_dist;
+                // Update entry point if closer (skip if vector missing)
+                if let Some(ep_vec) = self.get_point_vector(&ep.point_ref) {
+                    let tmp_dist = self.dist_f.eval(vector, ep_vec)
+                        .expect("HNSW search distance calculation failed for indexed vector");
+                    if tmp_dist < dist_to_entry {
+                        enter_point_copy = Some(Arc::clone(&ep.point_ref));
+                        dist_to_entry = tmp_dist;
+                    }
                 }
             } else {
                 trace!("layer still empty {} : got null list", l);
@@ -1906,10 +1964,12 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                 new_candidates_set.len()
             );
             for (_p_id, p_point) in new_candidates_set.iter() {
-                let p_vec = self.get_point_vector(p_point);
-                let dist_topoint = self.dist_f.eval(data, p_vec)
-                    .expect("Distance calculation failed for candidate vector in neighbor selection");
-                candidates.push(Arc::new(PointWithOrder::new(p_point, -dist_topoint)));
+                // Skip candidates with missing vectors
+                if let Some(p_vec) = self.get_point_vector(p_point) {
+                    let dist_topoint = self.dist_f.eval(data, p_vec)
+                        .expect("Distance calculation failed for candidate vector in neighbor selection");
+                    candidates.push(Arc::new(PointWithOrder::new(p_point, -dist_topoint)));
+                }
             }
         } // end if extend_candidates
         //
@@ -1917,16 +1977,25 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         while !candidates.is_empty() && neighbours_vec.len() < nb_neighbours_asked {
             // compare distances of e to data. we do not need to recompute dists!
             if let Some(e_p) = candidates.pop() {
+                // Skip candidates with missing vectors
+                let e_point_v = match self.get_point_vector(&e_p.point_ref) {
+                    Some(v) => v,
+                    None => continue, // Skip this candidate
+                };
                 let mut e_to_insert = true;
-                let e_point_v = self.get_point_vector(&e_p.point_ref);
                 // Note: Assertion removed - some distance metrics can return positive values in negative heaps
                 // assert!(e_p.dist_to_ref <= 0.);
                 // is e_p the nearest to reference? data than to previous neighbours
                 if !neighbours_vec.is_empty() {
                     e_to_insert = !neighbours_vec.iter().any(|d| {
-                        let d_vec = self.get_point_vector(&d.point_ref);
-                        self.dist_f.eval(e_point_v, d_vec)
-                            .expect("Distance calculation failed during neighbor pruning") <= -e_p.dist_to_ref
+                        // If neighbor vector is missing, treat as not blocking this candidate
+                        match self.get_point_vector(&d.point_ref) {
+                            Some(d_vec) => {
+                                self.dist_f.eval(e_point_v, d_vec)
+                                    .expect("Distance calculation failed during neighbor pruning") <= -e_p.dist_to_ref
+                            }
+                            None => false, // Missing neighbor doesn't block
+                        }
                     });
                 }
                 if e_to_insert {
@@ -1999,20 +2068,27 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             }
         }
         //
-        let entry_vec = self.get_point_vector(entry_point.as_ref());
+        let entry_vec = match self.get_point_vector(entry_point.as_ref()) {
+            Some(v) => v,
+            None => {
+                log::warn!("Entry point vector missing in search_general, returning empty results");
+                return Vec::<Neighbour>::new();
+            }
+        };
         let mut dist_to_entry = self.dist_f.eval(data, entry_vec)
             .expect("Distance calculation failed: vectors in HNSW index should be valid");
         for layer in (1..=entry_point.p_id.0).rev() {
             let mut neighbours = self.search_layer(data, Arc::clone(&entry_point), 1, layer, None);
             neighbours = from_positive_binaryheap_to_negative_binary_heap(&mut neighbours);
             if let Some(entry_point_tmp) = neighbours.pop() {
-                // get the lowest  distance point.
-                let tmp_vec = self.get_point_vector(&entry_point_tmp.point_ref);
-                let tmp_dist = self.dist_f.eval(data, tmp_vec)
-                    .expect("HNSW search distance calculation failed for indexed vector");
-                if tmp_dist < dist_to_entry {
-                    entry_point = Arc::clone(&entry_point_tmp.point_ref);
-                    dist_to_entry = tmp_dist;
+                // get the lowest distance point (skip if vector missing)
+                if let Some(tmp_vec) = self.get_point_vector(&entry_point_tmp.point_ref) {
+                    let tmp_dist = self.dist_f.eval(data, tmp_vec)
+                        .expect("HNSW search distance calculation failed for indexed vector");
+                    if tmp_dist < dist_to_entry {
+                        entry_point = Arc::clone(&entry_point_tmp.point_ref);
+                        dist_to_entry = tmp_dist;
+                    }
                 }
             }
         }
@@ -2049,6 +2125,14 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         ef_arg: usize,
         filter: Option<&dyn FilterT>,
     ) -> Vec<Neighbour> {
+        // PERF-OPT: Early termination for empty filters
+        // If filter.is_empty() returns true, no results can pass the filter.
+        // Skip HNSW traversal entirely and return empty results immediately.
+        if let Some(f) = filter {
+            if f.is_empty() {
+                return Vec::new();
+            }
+        }
         //
         let entry_point;
         {
@@ -2061,7 +2145,13 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             }
         }
         //
-        let entry_vec = self.get_point_vector(entry_point.as_ref());
+        let entry_vec = match self.get_point_vector(entry_point.as_ref()) {
+            Some(v) => v,
+            None => {
+                log::warn!("Entry point vector missing in search_filter, returning empty results");
+                return Vec::<Neighbour>::new();
+            }
+        };
         let mut dist_to_entry = self.dist_f.eval(data, entry_vec)
             .expect("Distance calculation failed: vectors in HNSW index should be valid");
         let mut pivot = Arc::clone(&entry_point);
@@ -2074,14 +2164,15 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             {
                 let neighbours = &pivot.neighbours.read()[layer as usize];
                 for n in neighbours {
-                    // get the lowest  distance point.
-                    let n_vec = self.get_point_vector(&n.point_ref);
-                    let tmp_dist = self.dist_f.eval(data, n_vec)
-                        .expect("HNSW search distance calculation failed for indexed vector");
-                    if tmp_dist < dist_to_entry {
-                        new_pivot = Some(Arc::clone(&n.point_ref));
-                        has_changed = true;
-                        dist_to_entry = tmp_dist;
+                    // get the lowest distance point (skip if vector missing)
+                    if let Some(n_vec) = self.get_point_vector(&n.point_ref) {
+                        let tmp_dist = self.dist_f.eval(data, n_vec)
+                            .expect("HNSW search distance calculation failed for indexed vector");
+                        if tmp_dist < dist_to_entry {
+                            new_pivot = Some(Arc::clone(&n.point_ref));
+                            has_changed = true;
+                            dist_to_entry = tmp_dist;
+                        }
                     }
                 } // end of for on neighbours
             }
@@ -2108,39 +2199,20 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         //
         let last = knbn.min(ef).min(neighbours.len());
         //
-        if let Some(filter_t) = filter {
-            let knn_neighbours: Vec<Neighbour> = neighbours[0..last]
-                .iter()
-                .map(|p| {
-                    if filter_t.hnsw_filter(&p.as_ref().point_ref.origin_id) {
-                        Some(Neighbour::new(
-                            p.as_ref().point_ref.origin_id,
-                            p.as_ref().dist_to_ref,
-                            p.as_ref().point_ref.p_id,
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .filter(|x| x.is_some())
-                .map(|x| x.unwrap())
-                .collect();
-            //
-            knn_neighbours
-        } else {
-            let knn_neighbours: Vec<Neighbour> = neighbours[0..last]
-                .iter()
-                .map(|p| {
-                    Neighbour::new(
-                        p.as_ref().point_ref.origin_id,
-                        p.as_ref().dist_to_ref,
-                        p.as_ref().point_ref.p_id,
-                    )
-                })
-                .collect();
-
-            knn_neighbours
-        }
+        // PERF-FIX: No post-processing filter needed!
+        // search_layer now filters ALL results including the entry point.
+        // Previously, entry point was added without filtering, requiring double filtering here.
+        // Now we just convert PointWithOrder to Neighbour.
+        neighbours[0..last]
+            .iter()
+            .map(|p| {
+                Neighbour::new(
+                    p.as_ref().point_ref.origin_id,
+                    p.as_ref().dist_to_ref,
+                    p.as_ref().point_ref.p_id,
+                )
+            })
+            .collect()
     } // end of search_filter
 
     #[inline]
