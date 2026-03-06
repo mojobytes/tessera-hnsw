@@ -233,8 +233,7 @@ struct LoadInit {
     descr: Description,
     //
     graphfile: BufReader<File>,
-    //
-    datafile: BufReader<File>,
+    // NOTE: datafile removed - vectors are in VectorStorage (.tsvf files)
 } // end of LoadInit
 
 /// a structure to provide simplified methods for reloading a previous dump.  
@@ -368,37 +367,16 @@ impl HnswIo {
             ));
         }
         let graphfile = graphfileres.unwrap();
-        //  same thing for data file
-        let mut dataname = self.basename.clone();
-        dataname.push_str(".hnsw.data");
-        let mut datapath = self.dir.clone();
-        datapath.push(dataname);
-        let datafileres = OpenOptions::new().read(true).open(&datapath);
-        if datafileres.is_err() {
-            println!(
-                "HnswIo::init : could not open file {:?}",
-                datapath.as_os_str()
-            );
-            error!(
-                "HnswIo::init : could not open file {:?}",
-                datapath.as_os_str()
-            );
-            return Err(anyhow!(
-                "HnswIo::reload_hnsw : could not open file {:?}",
-                datapath.as_os_str()
-            ));
-        }
-        let datafile = datafileres.unwrap();
+        // NOTE: .hnsw.data file opening REMOVED
+        // Vectors are stored in VectorStorage (.tsvf files)
         //
         let mut graph_in = BufReader::new(graphfile);
-        let data_in = BufReader::new(datafile);
         // we need to call load_description first to get distance name
         let hnsw_description = load_description(&mut graph_in).unwrap();
         //
         Ok(LoadInit {
             descr: hnsw_description,
             graphfile: graph_in,
-            datafile: data_in,
         })
     }
 
@@ -423,27 +401,11 @@ impl HnswIo {
             return Err(anyhow!("could not reload HNSW structure"));
         }
         let mut init = init.unwrap();
-        let data_in = &mut init.datafile;
         let graph_in = &mut init.graphfile;
         let description = init.descr;
         info!("format version : {}", description.format_version);
-        //  In datafile , we must read MAGICDATAP and dimension and check
-        let mut it_slice = [0u8; std::mem::size_of::<u32>()];
-        data_in.read_exact(&mut it_slice)?;
-        let magic = u32::from_ne_bytes(it_slice);
-        assert_eq!(
-            magic, MAGICDATAP,
-            "magic not equal to MAGICDATAP in load_point"
-        );
-        //
-        let mut it_slice = [0u8; std::mem::size_of::<usize>()];
-        data_in.read_exact(&mut it_slice)?;
-        let dimension = usize::from_ne_bytes(it_slice);
-        assert_eq!(
-            dimension, description.dimension,
-            "data dimension incoherent {:?} {:?} ",
-            dimension, description.dimension
-        );
+        // NOTE: Data file header verification REMOVED
+        // Dimension comes from Description in graph file
         //
         let _mode = description.dumpmode;
         let distname = description.distname.clone();
@@ -470,20 +432,15 @@ impl HnswIo {
         }
         let t_type = description.t_name.clone();
         debug!("T type name in dump = {:?}", t_type);
-        // Do we use mmap at reload
-        if self.options.use_mmap().0 {
-            let datamap_res = DataMap::from_hnswdump::<T>(self.dir.as_path(), &self.basename);
-            if datamap_res.is_err() {
-                error!("load_hnsw could not initialize mmap")
-            } else {
-                info!("reload using mmap");
-                self.datamap = Some(datamap_res.unwrap());
-            }
-        }
-        // reloader can use datamap
-        let layer_point_indexation = self.load_point_indexation(graph_in, &description, data_in)?;
+        // NOTE: mmap functionality disabled - vectors are in VectorStorage (.tsvf files)
+        // The .hnsw.data file no longer exists, so DataMap cannot be used
+        // Previously, if self.options.use_mmap().0 was true, it would create a DataMap
+        // from .hnsw.data file. This is no longer supported in graph-only mode.
+        // reloader loads graph-only (vectors in VectorStorage)
+        let layer_point_indexation = self.load_point_indexation(graph_in, &description)?;
         let data_dim = layer_point_indexation.get_data_dimension();
         //
+        let deleted_set = load_deleted_set(&self.dir, &self.basename)?;
         let hnsw: Hnsw<T, D> = Hnsw {
             max_nb_connection: description.max_nb_connection as usize,
             ef_construction: description.ef,
@@ -496,6 +453,8 @@ impl HnswIo {
             searching: false,
             datamap_opt: true, // set datamap_opt to true
             vector_storage: None, // Legacy mode, vectors embedded in Points
+            dyn_vector_storage: None, // Caller should set via set_dynamic_vector_storage() for graph-only reloads
+            deleted: parking_lot::RwLock::new(deleted_set),
         };
         //
         debug!("load_hnsw completed");
@@ -524,26 +483,10 @@ impl HnswIo {
         }
         let mut init = init.unwrap();
         //
-        let data_in = &mut init.datafile;
         let graph_in = &mut init.graphfile;
         let description = init.descr;
-        //  In datafile , we must read MAGICDATAP and dimension and check
-        let mut it_slice = [0u8; std::mem::size_of::<u32>()];
-        data_in.read_exact(&mut it_slice)?;
-        let magic = u32::from_ne_bytes(it_slice);
-        assert_eq!(
-            magic, MAGICDATAP,
-            "magic not equal to MAGICDATAP in load_point"
-        );
-        //
-        let mut it_slice = [0u8; std::mem::size_of::<usize>()];
-        data_in.read_exact(&mut it_slice)?;
-        let dimension = usize::from_ne_bytes(it_slice);
-        assert_eq!(
-            dimension, description.dimension,
-            "data dimension incoherent {:?} {:?} ",
-            dimension, description.dimension
-        );
+        // NOTE: Data file header verification REMOVED
+        // Dimension comes from Description in graph file
         //
         let _mode = description.dumpmode;
         let distname = description.distname.clone();
@@ -570,10 +513,11 @@ impl HnswIo {
         let t_type = description.t_name.clone();
         info!("T type name in dump = {:?}", t_type);
         //
-        //
-        let layer_point_indexation = self.load_point_indexation(graph_in, &description, data_in)?;
+        // Load graph-only (vectors in VectorStorage)
+        let layer_point_indexation = self.load_point_indexation(graph_in, &description)?;
         let data_dim = layer_point_indexation.get_data_dimension();
         //
+        let deleted_set = load_deleted_set(&self.dir, &self.basename)?;
         let hnsw: Hnsw<T, D> = Hnsw {
             max_nb_connection: description.max_nb_connection as usize,
             ef_construction: description.ef,
@@ -586,6 +530,8 @@ impl HnswIo {
             searching: false,
             datamap_opt: false,
             vector_storage: None, // Legacy mode, vectors embedded in Points
+            dyn_vector_storage: None, // Caller should set via set_dynamic_vector_storage() for graph-only reloads
+            deleted: parking_lot::RwLock::new(deleted_set),
         };
         //
         debug!("load_hnsw_with_dist completed");
@@ -598,7 +544,6 @@ impl HnswIo {
         &'a self,
         graph_in: &mut dyn Read,
         descr: &Description,
-        data_in: &mut dyn Read,
     ) -> anyhow::Result<PointIndexation<'b, T>>
     where
         T: 'static + Serialize + DeserializeOwned + Clone + Sized + Send + Sync + std::fmt::Debug,
@@ -632,8 +577,6 @@ impl HnswIo {
         }
         //
         let mut nb_points_loaded: usize = 0;
-        let mut nb_still_to_load = descr.nb_point as i64;
-        let (use_mmap, max_nbpoint_in_memory) = self.options.use_mmap();
         //
         for l in 0..nb_layer as usize {
             // read and check magic
@@ -649,30 +592,11 @@ impl HnswIo {
             let nbpoints = usize::from_ne_bytes(it_slice);
             debug!(" layer {:?} , nb points {:?}", l, nbpoints);
             let mut vlayer: Vec<Arc<Point<T>>> = Vec::with_capacity(nbpoints);
-            // load graph and data part of point. Points are dumped in the same order.
+            // load graph part of point. Points are dumped in the same order.
+            // NOTE: Vector data is NOT loaded from .hnsw.data file
+            // Vectors are stored in VectorStorage (.tsvf files)
             for r in 0..nbpoints {
-                // do we use mmap? for this point. We must load into memory up to threshold points, and we also want the  most
-                // frequently accessed points, i.e those in upper layers! to be physically loaded.
-                // So we do use mmap from the moment the number of points yet to be loaded is less than threshold.
-                let point_use_mmap = match use_mmap {
-                    false => false,
-                    true => {
-                        if nb_still_to_load <= max_nbpoint_in_memory as i64 {
-                            if log::log_enabled!(log::Level::Info)
-                                && nb_still_to_load == max_nbpoint_in_memory as i64
-                            {
-                                info!(
-                                    "Switching to points in memory. nb points stiil to load {:?}",
-                                    nb_still_to_load
-                                );
-                            }
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                };
-                let load_point_res = self.load_point(graph_in, descr, data_in, point_use_mmap);
+                let load_point_res = self.load_point(graph_in, descr);
                 if let Err(other) = load_point_res {
                     error!("in load_point_indexation, loading of point {} failed", r);
                     return Err(anyhow!(other));
@@ -692,10 +616,13 @@ impl HnswIo {
                 neighbourhood_map.insert(p_id, load_point_res.1);
                 vlayer.push(point);
                 nb_points_loaded += 1;
-                nb_still_to_load -= 1;
-                assert!(nb_still_to_load >= 0);
             }
             points_by_layer.push(vlayer);
+        }
+        // Pad points_by_layer to always have NB_LAYER_MAX entries
+        // This ensures consistency with freshly created HNSW structures
+        for _ in nb_layer..NB_LAYER_MAX {
+            points_by_layer.push(Vec::new());
         }
         // at this step all points are loaded , but without their neighbours fileds are not yet initialized
         let mut nbp: usize = 0;
@@ -759,6 +686,7 @@ impl HnswIo {
             ),
             nb_point: Arc::new(RwLock::new(nb_points_loaded)), // CAVEAT , we should increase , the whole thing is to be able to increment graph ?
             entry_point: Arc::new(RwLock::new(Some(entry_point))),
+            data_dimension: Arc::new(RwLock::new(descr.dimension)),
         };
         //
         debug!("Exiting load_pointIndexation");
@@ -776,8 +704,6 @@ impl HnswIo {
         &'a self,
         graph_in: &mut dyn Read,
         descr: &Description,
-        data_in: &mut dyn Read,
-        point_use_mmap: bool,
     ) -> Result<(Arc<Point<'b, T>>, Vec<Vec<Neighbour>>)>
     where
         T: 'static + DeserializeOwned + Clone + Sized + Send + Sync + std::fmt::Debug,
@@ -793,28 +719,17 @@ impl HnswIo {
         }
         let (origin_id, p_id, neighborhood) = load_res.unwrap();
         //
-        let point = match point_use_mmap {
-            false => {
-                let v = load_point_data::<T>(origin_id, data_in, descr);
-                if v.is_err() {
-                    error!("loading point {:?}", origin_id);
-                    std::process::exit(1);
-                }
-                Point::<T>::new(v.unwrap(), origin_id, p_id)
-            }
-            true => {
-                skip_point_data(origin_id, data_in, descr)?; // keep cohrence between data file and graph file!
-                debug!("constructing point from datamap, dataid : {:?}", origin_id);
-                let s: Option<&'b [T]> = self.datamap.as_ref().unwrap().get_data::<T>(&origin_id);
-                Point::<T>::new_from_mmap(s.unwrap(), origin_id, p_id)
-            }
-        };
+        // NOTE: Graph-only reload mode
+        // Vectors are NOT stored in .hnsw.data file
+        // They are stored in VectorStorage (.tsvf files) and accessed via VectorId
+        // Point is created with empty vector data
+        let point = Point::<T>::new(Vec::new(), origin_id, p_id);
+
         self.nb_point_loaded.fetch_add(1, Ordering::Relaxed);
         trace!(
-            "load_point  origin {:?} allocated size {:?}, dim {:?}",
+            "load_point (graph-only) origin {:?}, p_id {:?}",
             origin_id,
-            point.get_v().len(),
-            descr.dimension
+            p_id
         );
         //
         Ok((Arc::new(point), neighborhood))
@@ -872,10 +787,8 @@ impl Description {
         out.write_all(&self.level_scale.to_ne_bytes())?;
         //
         out.write_all(&self.nb_layer.to_ne_bytes())?;
-        if self.nb_layer != NB_LAYER_MAX {
-            println!("dump of Description, nb_layer != NB_MAX_LAYER");
-            return Err(anyhow!("dump of Description, nb_layer != NB_MAX_LAYER"));
-        }
+        // NOTE: nb_layer can be < NB_LAYER_MAX for smaller datasets
+        // The load code correctly handles any valid nb_layer value (1..=16)
         //
         info!("dumping ef {:?}", self.ef);
         out.write_all(&self.ef.to_ne_bytes())?;
@@ -1082,103 +995,11 @@ fn dump_point<T: Serialize + Clone + Sized + Send + Sync, W: Write>(
     Ok(1)
 } // end of dump for Point<T>
 
-// just reload data vector for point from file where data were dumped
-// used when we do not used memory map in reload
-fn load_point_data<T>(
-    origin_id: usize,
-    data_in: &mut dyn Read,
-    descr: &Description,
-) -> Result<Vec<T>>
-where
-    T: 'static + DeserializeOwned + Clone + Sized + Send + Sync,
-{
-    //
-    trace!("load_point_data , origin id : {}", origin_id);
-    //
-    // construct a point from data_in
-    //
-    let mut it_slice = [0u8; std::mem::size_of::<u32>()];
-    data_in.read_exact(&mut it_slice)?;
-    let magic = u32::from_ne_bytes(it_slice);
-    assert_eq!(
-        magic, MAGICDATAP,
-        "magic not equal to MAGICDATAP in load_point, point_id : {:?} ",
-        origin_id
-    );
-    // read origin id
-    let mut it_slice = [0u8; std::mem::size_of::<u64>()];
-    data_in.read_exact(&mut it_slice)?;
-    let origin_id_data = u64::from_ne_bytes(it_slice) as usize;
-    assert_eq!(
-        origin_id, origin_id_data,
-        "origin_id incoherent between graph and data"
-    );
-    // now read data. we use size_t that is in description, to take care of the casewhere we reload
-    let mut it_slice = [0u8; std::mem::size_of::<u64>()];
-    data_in.read_exact(&mut it_slice)?;
-    let serialized_len = u64::from_ne_bytes(it_slice);
-    trace!("serialized len to reload {:?}", serialized_len);
-    let mut v_serialized = vec![0; serialized_len as usize];
-    data_in.read_exact(&mut v_serialized)?;
-
-    let v: Vec<T> = if std::any::TypeId::of::<T>() != std::any::TypeId::of::<NoData>() {
-        match descr.format_version {
-            2 => bincode::deserialize(&v_serialized).unwrap(),
-            3 | 4 => {
-                let slice_t = unsafe {
-                    std::slice::from_raw_parts(v_serialized.as_ptr() as *const T, descr.dimension)
-                };
-                slice_t.to_vec()
-            }
-            _ => {
-                error!(
-                    "error in load_point, unknow format_version : {:?}",
-                    descr.format_version
-                );
-                std::process::exit(1);
-            }
-        }
-    } else {
-        Vec::new()
-    };
-    //
-    Ok(v)
-} // end of load_point_data
-
-// We need to maintain coherence in data and graph stream, so we read to keep in phase
-fn skip_point_data(origin_id: usize, data_in: &mut dyn Read, _descr: &Description) -> Result<()> {
-    //
-    let mut it_slice = [0u8; std::mem::size_of::<u32>()];
-    data_in.read_exact(&mut it_slice)?;
-    let magic = u32::from_ne_bytes(it_slice);
-    assert_eq!(
-        magic, MAGICDATAP,
-        "magic not equal to MAGICDATAP in load_point, point_id : {:?} ",
-        origin_id
-    );
-    // read origin id
-    let mut it_slice = [0u8; std::mem::size_of::<u64>()];
-    data_in.read_exact(&mut it_slice)?;
-    let origin_id_data = u64::from_ne_bytes(it_slice) as usize;
-    assert_eq!(
-        origin_id, origin_id_data,
-        "origin_id incoherent between graph and data"
-    );
-    //
-    // now read data. we use size_t that is in description, to take care of the casewhere we reload
-    let mut it_slice = [0u8; std::mem::size_of::<u64>()];
-    data_in.read_exact(&mut it_slice)?;
-    let serialized_len = u64::from_ne_bytes(it_slice);
-    trace!(
-        "skip_point_data : serialized len to reload {:?}",
-        serialized_len
-    );
-    let mut v_serialized = vec![0; serialized_len as usize];
-    data_in.read_exact(&mut v_serialized)?;
-    //
-    Ok(())
-} // end of skip_point_data
-
+//==================================================================================
+// NOTE: load_point_data() and skip_point_data() REMOVED
+// These functions loaded vector data from .hnsw.data file
+// Now vectors are stored ONLY in VectorStorage (.tsvf files)
+// Graph-only reload mode is the only supported mode
 //==================================================================================
 
 /// This structure gathers info loaded in dumped graph file for a point.
@@ -1216,7 +1037,10 @@ fn load_point_graph(graph_in: &mut dyn Read, descr: &Description) -> Result<Poin
     );
     //
     // Now  for each layer , read neighbours
-    let nb_layer = descr.nb_layer;
+    // All points are created with NB_LAYER_MAX (16) layers of neighborhoods
+    // (see Point::new in hnsw.rs), even if most layers are empty.
+    // So we always read NB_LAYER_MAX layers, regardless of descr.nb_layer.
+    let nb_layer = NB_LAYER_MAX;
     let mut neighborhood = Vec::<Vec<Neighbour>>::with_capacity(NB_LAYER_MAX as usize);
     for _l in 0..nb_layer {
         let mut neighbour: Neighbour = Default::default();
@@ -1350,6 +1174,89 @@ impl<'b, T: Serialize + DeserializeOwned + Clone + Sized + Send + Sync + std::fm
         Ok(1)
     }
 } // end impl block for Hnsw
+
+//===============================================================================================================
+// Deleted set persistence
+//===============================================================================================================
+
+/// Magic number for deleted set file format
+const MAGIC_DELETED: u32 = 0x00de1e7e;
+
+/// Save deleted set to `$dir/$basename.hnsw.deleted`.
+///
+/// File format (all little-endian, portable across architectures):
+///   - MAGIC_DELETED (u32 LE)
+///   - count (u64 LE) — number of deleted DataIds
+///   - count × DataId (u64 LE)
+///
+/// If the deleted set is empty, no file is written (saves I/O).
+pub(crate) fn save_deleted_set(
+    dir: &Path,
+    basename: &str,
+    deleted: &std::collections::HashSet<DataId>,
+) -> anyhow::Result<()> {
+    if deleted.is_empty() {
+        // Remove stale file if it exists from a previous save
+        let mut path = PathBuf::from(dir);
+        path.push(format!("{}.hnsw.deleted", basename));
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        return Ok(());
+    }
+    let mut path = PathBuf::from(dir);
+    path.push(format!("{}.hnsw.deleted", basename));
+    let file = File::create(&path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&MAGIC_DELETED.to_le_bytes())?;
+    let count = deleted.len() as u64;
+    writer.write_all(&count.to_le_bytes())?;
+    for &id in deleted {
+        writer.write_all(&(id as u64).to_le_bytes())?;
+    }
+    writer.flush()?;
+    debug!("saved {} deleted IDs to {:?}", deleted.len(), path);
+    Ok(())
+}
+
+/// Load deleted set from `$dir/$basename.hnsw.deleted`.
+///
+/// Returns an empty set if the file does not exist (backward compatible
+/// with indexes saved before mark_deleted support was added).
+pub(crate) fn load_deleted_set(
+    dir: &Path,
+    basename: &str,
+) -> anyhow::Result<std::collections::HashSet<DataId>> {
+    let mut path = PathBuf::from(dir);
+    path.push(format!("{}.hnsw.deleted", basename));
+    if !path.exists() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let file = File::open(&path)?;
+    let mut reader = BufReader::new(file);
+    let mut magic_buf = [0u8; 4];
+    reader.read_exact(&mut magic_buf)?;
+    let magic = u32::from_le_bytes(magic_buf);
+    if magic != MAGIC_DELETED {
+        return Err(anyhow!(
+            "invalid magic in deleted set file: expected {:#x}, got {:#x}",
+            MAGIC_DELETED,
+            magic
+        ));
+    }
+    let mut count_buf = [0u8; 8];
+    reader.read_exact(&mut count_buf)?;
+    let count = u64::from_le_bytes(count_buf) as usize;
+    let mut deleted = std::collections::HashSet::with_capacity(count);
+    let mut id_buf = [0u8; 8]; // Always u64 LE (portable format)
+    for _ in 0..count {
+        reader.read_exact(&mut id_buf)?;
+        let id = u64::from_le_bytes(id_buf) as DataId;
+        deleted.insert(id);
+    }
+    debug!("loaded {} deleted IDs from {:?}", deleted.len(), path);
+    Ok(deleted)
+}
 
 //===============================================================================================================
 
@@ -1520,7 +1427,10 @@ mod tests {
     } // end of test_dump_reload
 
     // this tests reloads a dump with memory mapping of data, inserts new data and redump
+    // NOTE: Disabled - mmap functionality removed in graph-only mode
+    // .hnsw.data file no longer created, vectors stored in VectorStorage (.tsvf files)
     #[test]
+    #[ignore = "mmap functionality removed - vectors in VectorStorage"]
     fn reload_with_mmap() {
         println!("\n\n hnswio tests : reload_with_mmap");
         log_init_test();
@@ -1798,5 +1708,125 @@ mod tests {
         // Verify ONLY .graph file was created (not .data)
         let checker = DumpFileChecker::new(directory.path(), fname);
         checker.assert_only_graph_exists(); // ← This SHOULD PASS now with Phase 2 changes
+    }
+
+    /// Test dump/reload with nb_layer < NB_LAYER_MAX (16)
+    /// This is the common case for datasets < 8.8 million vectors
+    /// For 100K vectors: ln(100000) ≈ 11.5, truncated = 11
+    #[test]
+    fn test_dump_reload_small_dataset_nb_layer_less_than_max() {
+        println!("\n\n test_dump_reload_small_dataset_nb_layer_less_than_max");
+        log_init_test();
+
+        // Generate test data - 1000 vectors (small dataset)
+        // nb_layer = min(16, ln(1000).trunc()) = min(16, 6) = 6
+        let mut rng = rand::rng();
+        let unif = Uniform::<f32>::new(0., 1.).unwrap();
+        let nbcolumn = 1000;
+        let nbrow = 10;
+        let mut data = Vec::with_capacity(nbcolumn);
+        for _j in 0..nbcolumn {
+            let mut vec = Vec::with_capacity(nbrow);
+            for _ in 0..nbrow {
+                vec.push(unif.sample(&mut rng));
+            }
+            data.push(vec);
+        }
+
+        // Calculate expected nb_layer (same formula as production code)
+        let expected_nb_layer = 16.min((nbcolumn as f32).ln().trunc() as usize);
+        assert!(expected_nb_layer < 16, "Test requires nb_layer < 16, got {}", expected_nb_layer);
+        println!("  Expected nb_layer: {} (< 16)", expected_nb_layer);
+
+        // Create HNSW with calculated nb_layer (NOT hardcoded 16)
+        let ef_construct = 25;
+        let nb_connection = 10;
+        let hnsw = Hnsw::<f32, distance::DistL1>::new(
+            nb_connection,
+            nbcolumn,
+            expected_nb_layer, // Use calculated value, not 16
+            ef_construct,
+            distance::DistL1 {},
+        );
+        for (i, d) in data.iter().enumerate() {
+            hnsw.insert((d, i));
+        }
+
+        // Dump should succeed (this was failing before the fix)
+        let fname = "test_small_dataset";
+        let directory = tempfile::tempdir().unwrap();
+        let dump_result = hnsw.file_dump(directory.path(), fname);
+        assert!(dump_result.is_ok(), "Dump should succeed with nb_layer={}, error: {:?}",
+                expected_nb_layer, dump_result.err());
+
+        // Reload should succeed and preserve nb_layer
+        let mut reloader = HnswIo::new(directory.path(), fname);
+        let hnsw_loaded: Hnsw<f32, DistL1> = reloader.load_hnsw::<f32, DistL1>().unwrap();
+
+        // Verify the loaded HNSW works correctly
+        check_graph_equality(&hnsw_loaded, &hnsw);
+        println!("  ✓ Dump/reload succeeded with nb_layer < 16");
+    }
+
+    /// Test dump/reload with 100K vectors (typical real-world size)
+    /// nb_layer = min(16, ln(100000).trunc()) = min(16, 11) = 11
+    #[test]
+    fn test_dump_reload_100k_vectors() {
+        println!("\n\n test_dump_reload_100k_vectors");
+        log_init_test();
+
+        // 100K vectors of dimension 8 (small dim for speed)
+        let mut rng = rand::rng();
+        let unif = Uniform::<f32>::new(0., 1.).unwrap();
+        let nbcolumn = 100_000;
+        let nbrow = 8;
+
+        // Calculate expected nb_layer
+        let expected_nb_layer = 16.min((nbcolumn as f32).ln().trunc() as usize);
+        assert_eq!(expected_nb_layer, 11, "100K vectors should have nb_layer=11");
+        println!("  Creating {} vectors with nb_layer={}", nbcolumn, expected_nb_layer);
+
+        // Generate data
+        let mut data = Vec::with_capacity(nbcolumn);
+        for _j in 0..nbcolumn {
+            let mut vec = Vec::with_capacity(nbrow);
+            for _ in 0..nbrow {
+                vec.push(unif.sample(&mut rng));
+            }
+            data.push(vec);
+        }
+
+        // Create HNSW with proper nb_layer
+        let ef_construct = 50;
+        let nb_connection = 16;
+        let hnsw = Hnsw::<f32, distance::DistL1>::new(
+            nb_connection,
+            nbcolumn,
+            expected_nb_layer,
+            ef_construct,
+            distance::DistL1 {},
+        );
+
+        // Insert in batches for speed
+        let data_with_id: Vec<(&Vec<f32>, usize)> = data.iter().zip(0..data.len()).collect();
+        hnsw.parallel_insert(&data_with_id);
+        println!("  Inserted {} vectors", nbcolumn);
+
+        // Dump should succeed
+        let fname = "test_100k";
+        let directory = tempfile::tempdir().unwrap();
+        let dump_result = hnsw.file_dump(directory.path(), fname);
+        assert!(dump_result.is_ok(), "Dump of 100K vectors should succeed, error: {:?}",
+                dump_result.err());
+        println!("  Dump succeeded");
+
+        // Reload should succeed
+        let mut reloader = HnswIo::new(directory.path(), fname);
+        let hnsw_loaded: Hnsw<f32, DistL1> = reloader.load_hnsw::<f32, DistL1>().unwrap();
+        println!("  Reload succeeded");
+
+        // Verify graph structure matches (can't search without vectors in NoStorage mode)
+        check_graph_equality(&hnsw_loaded, &hnsw);
+        println!("  ✓ Graph structure matches after reload");
     }
 } // end module tests

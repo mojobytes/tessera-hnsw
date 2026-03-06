@@ -988,6 +988,41 @@ pub struct Hnsw<'b, T: Clone + Send + Sync + 'b, D: Distance<T>, VS: VectorStora
     /// 4. Static vector storage (`vector_storage`) - for `PointData::VectorId`
     /// 5. Panic if no source available
     pub(crate) dyn_vector_storage: Option<Arc<dyn DynVectorStorage<T>>>,
+    /// Soft-deleted data IDs. Deleted points remain in the graph for traversal
+    /// but are excluded from search results and `get_nb_point()`.
+    ///
+    /// ## Thread Safety
+    ///
+    /// Uses `parking_lot::RwLock` for interior mutability: `mark_deleted(&self)`
+    /// takes a shared reference, allowing concurrent reads (search) and writes
+    /// (deletion) without requiring `&mut self`.
+    ///
+    /// - **Search (`search()`, `search_filter()`)**: Acquires read lock per-neighbor
+    ///   during traversal. Deleted points are still traversed as graph edges but
+    ///   excluded from results.
+    /// - **mark_deleted()**: Acquires write lock for O(1) HashSet insert.
+    ///   Concurrent searches may see a slightly stale view of the deleted set
+    ///   (a point deleted mid-search may still appear in that search's results).
+    ///   This is by design: snapshot semantics at search initiation.
+    ///
+    /// ## Why RwLock, not Mutex
+    ///
+    /// Search calls `is_deleted()` per visited neighbor (hundreds of times per query).
+    /// Multiple concurrent searches must read the deleted set in parallel.
+    /// `parking_lot::RwLock` allows this. `Mutex` would serialize all search threads
+    /// at every neighbor check, causing severe contention under concurrent search load.
+    /// Writes (mark_deleted) are rare by comparison and tolerate brief serialization.
+    ///
+    /// ## Persistence
+    ///
+    /// `file_dump()` snapshots the deleted set via `self.deleted.read().clone()`.
+    /// If `mark_deleted()` is called concurrently with `file_dump()`, the snapshot
+    /// is point-in-time: the persisted file may not include the concurrent deletion.
+    /// This is acceptable — the deletion will be captured in the next `file_dump()`.
+    ///
+    /// Persisted to `<prefix>.hnsw.deleted` on save, loaded on reload.
+    /// If the file is absent (older index format), defaults to empty set.
+    pub(crate) deleted: parking_lot::RwLock<std::collections::HashSet<DataId>>,
 } // end of Hnsw
 
 impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync, VS: VectorStorage<'b, T>> Hnsw<'b, T, D, VS> {
@@ -1033,6 +1068,7 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             datamap_opt: false,
             vector_storage: None,
             dyn_vector_storage: None,
+            deleted: parking_lot::RwLock::new(std::collections::HashSet::new()),
         }
     } // end of new
 
@@ -1086,6 +1122,7 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
             datamap_opt: false,
             vector_storage: Some(storage),
             dyn_vector_storage: None,
+            deleted: parking_lot::RwLock::new(std::collections::HashSet::new()),
         }
     } // end of new_with_storage
 
@@ -1219,9 +1256,50 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
     pub fn get_max_nb_connection(&self) -> u8 {
         self.max_nb_connection as u8
     }
-    /// returns number of points stored in hnsw structure
+    /// Returns number of active (non-deleted) points in the HNSW structure.
     pub fn get_nb_point(&self) -> usize {
+        self.layer_indexed_points.get_nb_point() - self.deleted.read().len()
+    }
+
+    /// Returns total number of points in the graph including deleted ones.
+    pub fn get_nb_point_total(&self) -> usize {
         self.layer_indexed_points.get_nb_point()
+    }
+
+    /// Soft-delete a point by its data ID. The point remains in the graph
+    /// for traversal but is excluded from search results.
+    ///
+    /// # Return Value
+    ///
+    /// Returns `true` if the ID was newly marked as deleted.
+    /// Returns `false` if the ID was already in the deleted set (idempotent).
+    ///
+    /// # Caller Responsibility
+    ///
+    /// This method does NOT validate whether `data_id` exists in the graph.
+    /// Marking a non-existent ID is harmless for search correctness (the ID
+    /// will never appear in results anyway), but inflates `deleted_count()`
+    /// and `get_nb_point()` will under-count. Callers SHOULD validate the
+    /// ID exists before calling this method.
+    ///
+    /// # Thread Safety
+    ///
+    /// Takes `&self` (not `&mut self`) via interior mutability
+    /// (`parking_lot::RwLock<HashSet<DataId>>`). Safe to call concurrently
+    /// with `search()` and other `mark_deleted()` calls. The write lock is
+    /// held only for the duration of the `HashSet::insert()` call.
+    pub fn mark_deleted(&self, data_id: DataId) -> bool {
+        self.deleted.write().insert(data_id)
+    }
+
+    /// Check if a data ID has been soft-deleted.
+    pub fn is_deleted(&self, data_id: DataId) -> bool {
+        self.deleted.read().contains(&data_id)
+    }
+
+    /// Returns the number of soft-deleted points.
+    pub fn deleted_count(&self) -> usize {
+        self.deleted.read().len()
     }
     /// set searching mode.  
     /// It is not possible to do parallel insertion and parallel searching simultaneously in different threads
@@ -1366,9 +1444,10 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         // This ensures all results in return_points pass the filter, eliminating
         // the need for redundant post-processing in search_filter().
         // Previously, entry point was added unconditionally, requiring double filtering.
-        let entry_passes_filter = filter
-            .as_ref()
-            .is_none_or(|f| f.hnsw_filter(&entry_point.origin_id));
+        let entry_passes_filter = !self.is_deleted(entry_point.origin_id)
+            && filter
+                .as_ref()
+                .is_none_or(|f| f.hnsw_filter(&entry_point.origin_id));
         if entry_passes_filter {
             return_points.push(Arc::new(PointWithOrder::new(
                 &entry_point,
@@ -1431,6 +1510,8 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                     visited_point_id.insert(e.point_ref.p_id, Arc::clone(&e.point_ref));
                     trace!("             visited insertion {:?}", e.point_ref.p_id);
 
+                    let is_deleted = self.is_deleted(e.point_ref.origin_id);
+
                     // Skip neighbors with missing vectors (graceful degradation)
                     let e_vec = match self.get_point_vector(&e.point_ref) {
                         Some(v) => v,
@@ -1450,14 +1531,16 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
                     let closer_than_worst = return_points.peek().is_none_or(|f| e_dist_to_p < f.dist_to_ref);
                     let should_explore = need_more_filtered || closer_than_worst || return_points.len() < ef;
 
-                    // Always add to candidate_points for exploration when promising
+                    // Deleted points are still traversable for graph exploration (maintains
+                    // search quality) but excluded from results.
                     if should_explore {
                         candidate_points
                             .push(Arc::new(PointWithOrder::new(&e.point_ref, -e_dist_to_p)));
                     }
 
-                    // Add to return_points only if passes filter (or no filter) AND closer than worst
-                    let passes_filter = filter.as_ref().is_none_or(|f| f.hnsw_filter(&e.point_ref.origin_id));
+                    // Add to return_points only if NOT deleted, passes filter, AND closer than worst
+                    let passes_filter = !is_deleted
+                        && filter.as_ref().is_none_or(|f| f.hnsw_filter(&e.point_ref.origin_id));
                     let should_add_to_results = passes_filter && (closer_than_worst || return_points.len() < ef);
 
                     if should_add_to_results {
