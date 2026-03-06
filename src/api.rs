@@ -75,14 +75,12 @@ where
         let mut dumpinit = DumpInit::new(path, file_basename, overwrite);
         let dumpname = dumpinit.get_basename().clone();
         //
-        let res = self.dump(DumpMode::Full, &mut dumpinit);
-        //
+        self.dump(DumpMode::Full, &mut dumpinit)?;
         dumpinit.flush()?;
+        // Save deleted set alongside the graph file
+        let deleted_snapshot = self.deleted.read().clone();
+        crate::hnswio::save_deleted_set(path, &dumpname, &deleted_snapshot)?;
         info!("\n End of dump, file basename : {}\n", &dumpname);
-        if res.is_ok() {
-            Ok(dumpname)
-        } else {
-            Err(anyhow::anyhow!("unexpected error"))
-        }
+        Ok(dumpname)
     } // end of dump
 } // end of impl block AnnT for Hnsw<T,D>

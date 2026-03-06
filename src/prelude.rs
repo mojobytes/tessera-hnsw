@@ -9,3 +9,5 @@ pub use crate::filter::*;
 pub use crate::hnswio::*;
 
 pub use crate::distance::*;
+
+pub use crate::storage::{DynVectorStorage, InMemoryVectorStorage, VectorStorage};

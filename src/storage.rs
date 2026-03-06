@@ -24,6 +24,59 @@
 
 use std::fmt::Debug;
 
+/// Trait for dynamic vector storage (Arc-compatible, no lifetime parameter).
+///
+/// This trait is designed for use with `Arc<dyn DynVectorStorage<T>>` where the lifetime
+/// of the returned slice is tied to `&self` rather than a fixed lifetime parameter.
+///
+/// Use this trait when you need to:
+/// - Store vector storage in `Arc<dyn>` (e.g., for graph-only HNSW reload)
+/// - Pass vector storage across thread boundaries
+/// - Decouple vector storage lifetime from the consumer's lifetime
+///
+/// # Comparison with `VectorStorage<'a, T>`
+///
+/// - `VectorStorage<'a, T>`: Lifetime parameter on trait, used for static references
+/// - `DynVectorStorage<T>`: No lifetime parameter, used for dynamic dispatch with Arc
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use tessera_hnsw::storage::{DynVectorStorage, InMemoryVectorStorage};
+/// use std::sync::Arc;
+///
+/// let vectors = vec![vec![1.0f32, 2.0], vec![3.0, 4.0]];
+/// let storage = InMemoryVectorStorage::new(vectors);
+///
+/// // Can be wrapped in Arc for dynamic dispatch
+/// let dyn_storage: Arc<dyn DynVectorStorage<f32>> = Arc::new(storage);
+///
+/// // Use with graph-only HNSW reload
+/// let mut hnsw = reloader.load_hnsw::<f32, DistL2>()?;
+/// hnsw.set_dynamic_vector_storage(dyn_storage);
+/// ```
+pub trait DynVectorStorage<T>: Send + Sync + Debug
+where
+    T: Clone + Send + Sync,
+{
+    /// Retrieves a vector by its ID.
+    ///
+    /// The returned slice's lifetime is tied to `&self`, making this method
+    /// compatible with `Arc<dyn DynVectorStorage<T>>`.
+    fn get_vector(&self, id: usize) -> Option<&[T]>;
+
+    /// Returns the dimensionality of stored vectors.
+    fn dimension(&self) -> usize;
+
+    /// Returns the total number of vectors in storage.
+    fn len(&self) -> usize;
+
+    /// Checks if the storage is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Trait for external vector storage.
 ///
 /// Implementors of this trait provide access to vectors stored externally to the HNSW structure.
@@ -243,10 +296,32 @@ impl<'a, T: Clone + Send + Sync + Debug + 'a> VectorStorage<'a, T> for InMemoryV
     fn storage_info(&self) -> String {
         format!(
             "InMemoryVectorStorage {{ vectors: {}, dimension: {}, memory: ~{} KB }}",
-            self.len(),
-            self.dimension(),
-            (self.len() * self.dimension() * std::mem::size_of::<T>()) / 1024
+            self.vectors.len(),
+            self.dimension,
+            (self.vectors.len() * self.dimension * std::mem::size_of::<T>()) / 1024
         )
+    }
+}
+
+/// Implementation of `DynVectorStorage` for `InMemoryVectorStorage`.
+///
+/// This allows `InMemoryVectorStorage` to be used with `Arc<dyn DynVectorStorage<T>>`
+/// for dynamic dispatch scenarios like graph-only HNSW reload.
+impl<T: Clone + Send + Sync + Debug> DynVectorStorage<T> for InMemoryVectorStorage<T> {
+    fn get_vector(&self, id: usize) -> Option<&[T]> {
+        self.vectors.get(id).map(|v| v.as_slice())
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn len(&self) -> usize {
+        self.vectors.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.vectors.is_empty()
     }
 }
 
@@ -259,9 +334,9 @@ mod tests {
         let vectors = vec![vec![1.0f32, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
 
         let storage = InMemoryVectorStorage::new(vectors);
-        assert_eq!(storage.dimension(), 3);
-        assert_eq!(storage.len(), 2);
-        assert!(!storage.is_empty());
+        assert_eq!(DynVectorStorage::dimension(&storage), 3);
+        assert_eq!(DynVectorStorage::len(&storage), 2);
+        assert!(!DynVectorStorage::is_empty(&storage));
     }
 
     #[test]
@@ -270,13 +345,13 @@ mod tests {
 
         let storage = InMemoryVectorStorage::new(vectors);
 
-        let vec0 = storage.get_vector(0).unwrap();
+        let vec0 = DynVectorStorage::get_vector(&storage, 0).unwrap();
         assert_eq!(vec0, &[1.0, 2.0, 3.0]);
 
-        let vec1 = storage.get_vector(1).unwrap();
+        let vec1 = DynVectorStorage::get_vector(&storage, 1).unwrap();
         assert_eq!(vec1, &[4.0, 5.0, 6.0]);
 
-        assert!(storage.get_vector(2).is_none());
+        assert!(DynVectorStorage::get_vector(&storage, 2).is_none());
     }
 
     #[test]
@@ -285,9 +360,10 @@ mod tests {
 
         let storage = InMemoryVectorStorage::new(vectors);
 
-        assert!(storage.contains(0));
-        assert!(storage.contains(1));
-        assert!(!storage.contains(2));
+        // contains() is only defined on VectorStorage, use DynVectorStorage::get_vector
+        assert!(DynVectorStorage::get_vector(&storage, 0).is_some());
+        assert!(DynVectorStorage::get_vector(&storage, 1).is_some());
+        assert!(DynVectorStorage::get_vector(&storage, 2).is_none());
     }
 
     #[test]
@@ -298,9 +374,9 @@ mod tests {
 
         let storage = InMemoryVectorStorage::from_slices(&slices);
 
-        assert_eq!(storage.dimension(), 3);
-        assert_eq!(storage.len(), 2);
-        assert_eq!(storage.get_vector(0).unwrap(), &[1.0, 2.0, 3.0]);
+        assert_eq!(DynVectorStorage::dimension(&storage), 3);
+        assert_eq!(DynVectorStorage::len(&storage), 2);
+        assert_eq!(DynVectorStorage::get_vector(&storage, 0).unwrap(), &[1.0, 2.0, 3.0]);
     }
 
     #[test]
