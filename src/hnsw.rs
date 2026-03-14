@@ -1266,6 +1266,20 @@ impl<'b, T: Clone + Send + Sync + std::fmt::Debug, D: Distance<T> + Send + Sync,
         self.layer_indexed_points.get_nb_point()
     }
 
+    /// Returns the `origin_id` (external DataId / VectorId) of the HNSW entry
+    /// point, or `None` if the index is empty.
+    ///
+    /// The entry point is the top-level node used to start every search and
+    /// insertion traversal. If this ID is orphaned (not present in storage),
+    /// search and insertion quality degrades for ALL operations.
+    pub fn get_entry_point_origin_id(&self) -> Option<usize> {
+        self.layer_indexed_points
+            .entry_point
+            .read()
+            .as_ref()
+            .map(|p| p.get_origin_id())
+    }
+
     /// Soft-delete a point by its data ID. The point remains in the graph
     /// for traversal but is excluded from search results.
     ///
@@ -2877,5 +2891,36 @@ mod tests {
         // Search should work across both types
         let results = hnsw.search(&[1.0, 0.0], 3, 50);
         assert_eq!(results.len(), 3, "Should find all 3 points");
+    }
+    #[test]
+    fn test_get_entry_point_origin_id_empty_index() {
+        log_init_test();
+        let hnsw =
+            Hnsw::<f32, distance::DistL2, NoStorage>::new(16, 0, 8, 200, distance::DistL2 {});
+        assert_eq!(hnsw.get_entry_point_origin_id(), None);
+    }
+
+    #[test]
+    fn test_get_entry_point_origin_id_after_insert() {
+        log_init_test();
+        let hnsw =
+            Hnsw::<f32, distance::DistL2, NoStorage>::new(16, 100, 8, 200, distance::DistL2 {});
+        // First inserted point becomes the initial entry point
+        let data: Vec<f32> = vec![1.0; 8];
+        hnsw.insert((&data, 42));
+        assert_eq!(
+            hnsw.get_entry_point_origin_id(),
+            Some(42),
+            "First inserted vector should become the entry point"
+        );
+        // Insert more points — entry point may or may not change, but must remain Some
+        for i in 0..5 {
+            let v: Vec<f32> = vec![i as f32; 8];
+            hnsw.insert((&v, 100 + i));
+        }
+        assert!(
+            hnsw.get_entry_point_origin_id().is_some(),
+            "Entry point must exist after multiple inserts"
+        );
     }
 } // end of module test
